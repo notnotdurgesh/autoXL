@@ -9,16 +9,21 @@ interface CellFormatting {
   bold?: boolean;
   italic?: boolean;
   underline?: boolean;
+  strikethrough?: boolean;
   textAlign?: 'left' | 'center' | 'right' | 'justify';
   verticalAlign?: 'top' | 'middle' | 'bottom';
   color?: string;
   backgroundColor?: string;
+  numberFormat?: 'general' | 'number' | 'currency' | 'percentage' | 'date' | 'time' | 'custom';
+  decimalPlaces?: number;
+  link?: string;
 }
 
 interface CellData {
   value: string | number | null;
   isEditing?: boolean;
   formatting?: CellFormatting;
+  displayValue?: string; // For formatted display (currency, percentage, etc.)
 }
 
 interface SheetData {
@@ -1059,6 +1064,73 @@ const ExcelSpreadsheet: React.FC = memo(() => {
     setSelectedCell({ row: 0, col: 0 });
   }, [visibleRows, visibleCols]);
 
+  // Column and row selection handlers
+  const selectEntireColumn = useCallback((colIndex: number) => {
+    setSelectedRange({
+      startRow: 0,
+      startCol: colIndex,
+      endRow: visibleRows - 1,
+      endCol: colIndex
+    });
+    setSelectedCell({ row: 0, col: colIndex });
+    setCopiedData(null); // Clear any copied data
+  }, [visibleRows]);
+
+  const selectEntireRow = useCallback((rowIndex: number) => {
+    setSelectedRange({
+      startRow: rowIndex,
+      startCol: 0,
+      endRow: rowIndex,
+      endCol: visibleCols - 1
+    });
+    setSelectedCell({ row: rowIndex, col: 0 });
+    setCopiedData(null); // Clear any copied data
+  }, [visibleCols]);
+
+  const handleColumnHeaderClick = useCallback((colIndex: number, event: React.MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    
+    if (event.shiftKey && selectedRange) {
+      // Extend column selection with Shift+click
+      const startCol = Math.min(selectedRange.startCol, colIndex);
+      const endCol = Math.max(selectedRange.endCol, colIndex);
+      setSelectedRange({
+        startRow: 0,
+        startCol: startCol,
+        endRow: visibleRows - 1,
+        endCol: endCol
+      });
+    } else {
+      selectEntireColumn(colIndex);
+    }
+  }, [selectEntireColumn, selectedRange, visibleRows]);
+
+  const handleRowHeaderClick = useCallback((rowIndex: number, event: React.MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    
+    if (event.shiftKey && selectedRange) {
+      // Extend row selection with Shift+click
+      const startRow = Math.min(selectedRange.startRow, rowIndex);
+      const endRow = Math.max(selectedRange.endRow, rowIndex);
+      setSelectedRange({
+        startRow: startRow,
+        startCol: 0,
+        endRow: endRow,
+        endCol: visibleCols - 1
+      });
+    } else {
+      selectEntireRow(rowIndex);
+    }
+  }, [selectEntireRow, selectedRange, visibleCols]);
+
+  const handleSelectAllClick = useCallback((event: React.MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    selectAllCells();
+  }, [selectAllCells]);
+
   const commitEdit = useCallback(() => {
     if (editingCell) {
       const numValue = Number(inputValue);
@@ -1102,6 +1174,120 @@ const ExcelSpreadsheet: React.FC = memo(() => {
     const cell = sheetData[selectedCell.row]?.[selectedCell.col];
     return cell?.formatting || {};
   }, [selectedCell, sheetData]);
+
+  // Helper function to format numbers based on format type
+  const formatCellValue = useCallback((value: string | number | null, formatting?: CellFormatting): string => {
+    if (value === null || value === undefined || value === '') return '';
+    
+    const numValue = Number(value);
+    const format = formatting?.numberFormat || 'general';
+    const decimals = formatting?.decimalPlaces ?? 2;
+    
+    if (isNaN(numValue)) return String(value);
+    
+    switch (format) {
+      case 'currency':
+        return new Intl.NumberFormat('en-US', {
+          style: 'currency',
+          currency: 'USD',
+          minimumFractionDigits: decimals,
+          maximumFractionDigits: decimals
+        }).format(numValue);
+      
+      case 'percentage':
+        return new Intl.NumberFormat('en-US', {
+          style: 'percent',
+          minimumFractionDigits: decimals,
+          maximumFractionDigits: decimals
+        }).format(numValue / 100);
+      
+      case 'number':
+        return new Intl.NumberFormat('en-US', {
+          minimumFractionDigits: decimals,
+          maximumFractionDigits: decimals
+        }).format(numValue);
+      
+      case 'date':
+        try {
+          return new Date(numValue).toLocaleDateString();
+        } catch {
+          return String(value);
+        }
+      
+      case 'time':
+        try {
+          return new Date(numValue).toLocaleTimeString();
+        } catch {
+          return String(value);
+        }
+      
+      default:
+        return String(value);
+    }
+  }, []);
+
+  // Helper function to normalize URL
+  const normalizeUrl = useCallback((url: string): string => {
+    if (!url) return '';
+    
+    // If URL already has protocol, return as is
+    if (url.match(/^https?:\/\//i)) {
+      return url;
+    }
+    
+    // If it looks like an email, add mailto:
+    if (url.includes('@') && !url.includes(' ')) {
+      return `mailto:${url}`;
+    }
+    
+    // Default to https:// for web URLs
+    return `https://${url}`;
+  }, []);
+
+  const handleInsertLink = useCallback((url: string, text?: string) => {
+    if (!selectedCell) return;
+    
+    const currentValue = getCellValue(selectedCell.row, selectedCell.col);
+    const currentFormatting = sheetData[selectedCell.row]?.[selectedCell.col]?.formatting || {};
+    const normalizedUrl = normalizeUrl(url);
+    
+    const command: Command = {
+      execute: () => {
+        setSheetData(prev => ({
+          ...prev,
+          [selectedCell.row]: {
+            ...prev[selectedCell.row],
+            [selectedCell.col]: {
+              ...prev[selectedCell.row]?.[selectedCell.col],
+              value: text || String(currentValue),
+              formatting: {
+                ...currentFormatting,
+                link: normalizedUrl,
+                color: '#0066cc',
+                underline: true
+              }
+            }
+          }
+        }));
+      },
+      undo: () => {
+        setSheetData(prev => ({
+          ...prev,
+          [selectedCell.row]: {
+            ...prev[selectedCell.row],
+            [selectedCell.col]: {
+              ...prev[selectedCell.row]?.[selectedCell.col],
+              value: currentValue,
+              formatting: currentFormatting
+            }
+          }
+        }));
+      },
+      description: `Insert link in ${generateColumnLabel(selectedCell.col)}${selectedCell.row + 1}`
+    };
+    
+    executeCommand(command);
+  }, [selectedCell, getCellValue, sheetData, executeCommand, generateColumnLabel, normalizeUrl]);
 
   const formatSelectedCells = useCallback((formatting: Partial<CellFormatting>) => {
     const selectedCells = getSelectedCells();
@@ -1664,6 +1850,9 @@ const ExcelSpreadsheet: React.FC = memo(() => {
     onMouseUp: () => void;
     onKeyDown: (e: React.KeyboardEvent, row: number, col: number) => void;
     onFillHandleMouseDown: (e: React.MouseEvent) => void;
+    onLinkClick: (e: React.MouseEvent) => void;
+    hasLink: boolean;
+    linkUrl?: string;
   }>(({
     row,
     col,
@@ -1683,7 +1872,10 @@ const ExcelSpreadsheet: React.FC = memo(() => {
     onMouseEnter,
     onMouseUp,
     onKeyDown,
-    onFillHandleMouseDown
+    onFillHandleMouseDown,
+    onLinkClick,
+    hasLink,
+    linkUrl
   }) => {
     let cellClasses = 'cell';
     if (isSelected) cellClasses += ' selected';
@@ -1742,6 +1934,8 @@ const ExcelSpreadsheet: React.FC = memo(() => {
               e.stopPropagation();
               onCellDoubleClick(row, col);
             }}
+            onClick={hasLink ? onLinkClick : undefined}
+            title={hasLink ? `Double click to open: ${linkUrl}` : undefined}
           >
             {String(cellValue)}
             {shouldShowFillHandle && (
@@ -1802,16 +1996,40 @@ const ExcelSpreadsheet: React.FC = memo(() => {
       verticalAlign: formatting.verticalAlign,
     };
 
+    // Format the display value based on number format
+    const displayValue = formatCellValue(cellValue, formatting);
+    
+    // Build text decoration
+    let textDecoration = 'none';
+    if (formatting.underline && formatting.strikethrough) {
+      textDecoration = 'underline line-through';
+    } else if (formatting.underline) {
+      textDecoration = 'underline';
+    } else if (formatting.strikethrough) {
+      textDecoration = 'line-through';
+    }
+
     // Create content style from formatting with flexbox alignment
     const contentStyle: React.CSSProperties = {
       fontFamily: formatting.fontFamily,
       fontSize: formatting.fontSize ? `${formatting.fontSize}px` : undefined,
       fontWeight: formatting.bold ? 'bold' : 'normal',
       fontStyle: formatting.italic ? 'italic' : 'normal',
-      textDecoration: formatting.underline ? 'underline' : 'none',
+      textDecoration,
       color: formatting.color,
       justifyContent: getJustifyContent(formatting.textAlign),
       alignItems: getAlignItems(formatting.verticalAlign),
+                  cursor: formatting.link ? 'pointer' : 'inherit',
+            position: 'relative',
+    };
+
+    // Handle link click - defined outside render callback
+    const cellLinkClick = (e: React.MouseEvent) => {
+      if (formatting.link) {
+        e.preventDefault();
+        e.stopPropagation();
+        window.open(formatting.link, '_blank', 'noopener,noreferrer');
+      }
     };
 
     return (
@@ -1819,7 +2037,7 @@ const ExcelSpreadsheet: React.FC = memo(() => {
         key={`${row}-${col}`}
         row={row}
         col={col}
-        cellValue={cellValue}
+        cellValue={displayValue}
         cellData={cellData}
         isSelected={isSelected}
         isEditing={isEditing}
@@ -1837,9 +2055,13 @@ const ExcelSpreadsheet: React.FC = memo(() => {
         onMouseUp={handleMouseUp}
         onKeyDown={handleKeyDown}
         onFillHandleMouseDown={handleFillHandleMouseDown}
+        onLinkClick={cellLinkClick}
+        hasLink={!!formatting.link}
+        linkUrl={formatting.link}
       />
     );
-  }, [getCellValue, sheetData, isCellSelected, editingCell, selectedCell, isCellCopied, isCellCut, isCellInFillPreview, selectedRange, handleCellClick, handleCellDoubleClick, handleMouseDown, handleMouseEnter, handleMouseUp, handleKeyDown, handleFillHandleMouseDown, getJustifyContent, getAlignItems, CellComponent]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [getCellValue, sheetData, isCellSelected, editingCell, selectedCell, isCellCopied, isCellCut, isCellInFillPreview, selectedRange, handleCellClick, handleCellDoubleClick, handleMouseDown, handleMouseEnter, handleMouseUp, handleKeyDown, handleFillHandleMouseDown, getJustifyContent, getAlignItems, formatCellValue]);
 
   return (
     <div className="spreadsheet-container" tabIndex={0} onFocus={() => {}} onClick={() => {}}>
@@ -1855,6 +2077,8 @@ const ExcelSpreadsheet: React.FC = memo(() => {
         canUndo={canUndo}
         canRedo={canRedo}
         canPaste={!!copiedData || true}
+        selectedCellValue={selectedCell ? getCellValue(selectedCell.row, selectedCell.col) : null}
+        onInsertLink={handleInsertLink}
       />
 
       <style>{`
@@ -1884,9 +2108,11 @@ const ExcelSpreadsheet: React.FC = memo(() => {
           transform: scale(${zoomLevel / 100}) translateZ(0);
           transform-origin: top left;
           will-change: transform, scroll-position;
-          contain: layout style paint;
+          contain: strict;
+          contain-intrinsic-size: 100% 100%;
           backface-visibility: hidden;
           -webkit-backface-visibility: hidden;
+          content-visibility: auto;
         }
         
         .spreadsheet-table {
@@ -1895,12 +2121,15 @@ const ExcelSpreadsheet: React.FC = memo(() => {
           min-width: 100%;
           transform: translateZ(0);
           will-change: contents;
+          table-layout: fixed;
+          contain: strict;
+          contain-intrinsic-size: 100% auto;
         }
         
         .header-row th,
         .row-header {
           background: linear-gradient(180deg, #f0f0f0 0%, #d0d0d0 100%);
-          border: 1px solid #a6a6a6;
+          border: 1px solid #a6a6a6 !important;
           padding: 4px 6px;
           font-weight: 400;
           font-size: 11px;
@@ -1911,6 +2140,32 @@ const ExcelSpreadsheet: React.FC = memo(() => {
           min-width: 80px;
           width: 80px;
           user-select: none;
+          box-sizing: border-box;
+          border-collapse: collapse;
+          contain: layout style;
+          transition: background-color 0.15s ease;
+        }
+        
+        .header-row th:hover,
+        .row-header:hover {
+          background: linear-gradient(180deg, #e8e8e8 0%, #c8c8c8 100%) !important;
+        }
+        
+        .header-row th:active,
+        .row-header:active {
+          background: linear-gradient(180deg, #d8d8d8 0%, #b8b8b8 100%) !important;
+        }
+        
+        .row-col-header {
+          cursor: pointer !important;
+        }
+        
+        .row-col-header:hover {
+          background: linear-gradient(180deg, #e8e8e8 0%, #c8c8c8 100%) !important;
+        }
+        
+        .row-col-header:active {
+          background: linear-gradient(180deg, #d8d8d8 0%, #b8b8b8 100%) !important;
         }
         
         .header-row th:first-child,
@@ -1945,7 +2200,7 @@ const ExcelSpreadsheet: React.FC = memo(() => {
         }
         
         .cell {
-          border: 1px solid #d4d4d4;
+          border: 1px solid #d4d4d4 !important;
           padding: 0;
           height: 20px;
           min-width: 80px;
@@ -1955,10 +2210,12 @@ const ExcelSpreadsheet: React.FC = memo(() => {
           cursor: cell;
           outline: none;
           transform: translateZ(0);
-          will-change: background-color, border-color;
+          will-change: background-color;
           contain: layout style;
           user-select: none;
           pointer-events: auto;
+          box-sizing: border-box;
+          border-collapse: collapse;
         }
         
         .cell.editing {
@@ -1972,6 +2229,7 @@ const ExcelSpreadsheet: React.FC = memo(() => {
         }
         
         .cell.selected {
+          border: 1px solid #d4d4d4 !important;
           box-shadow: inset 0 0 0 1px rgba(33, 115, 70, 0.6) !important;
           position: relative;
           z-index: 40;
@@ -1993,6 +2251,7 @@ const ExcelSpreadsheet: React.FC = memo(() => {
           border: 3px solid #217346 !important;
           z-index: 50;
           box-shadow: 0 0 0 1px rgba(33, 115, 70, 0.3) !important;
+          position: relative;
         }
         
         .cell.primary-selected::after {
@@ -2008,10 +2267,23 @@ const ExcelSpreadsheet: React.FC = memo(() => {
         }
         
         .cell.copied {
-          border: 2px dashed #0078d4 !important;
+          border: 1px solid #d4d4d4 !important;
           z-index: 30;
           position: relative;
           animation: copied-border-pulse 2s ease-in-out infinite;
+          box-shadow: inset 0 0 0 2px #0078d4;
+        }
+        
+        .cell.copied::before {
+          content: '';
+          position: absolute;
+          top: -1px;
+          left: -1px;
+          right: -1px;
+          bottom: -1px;
+          border: 2px dashed #0078d4;
+          pointer-events: none;
+          z-index: 1;
         }
         
         .cell.copied::after {
@@ -2028,10 +2300,23 @@ const ExcelSpreadsheet: React.FC = memo(() => {
         }
         
         .cell.cut {
-          border: 2px dotted #d73502 !important;
+          border: 1px solid #d4d4d4 !important;
           z-index: 30;
           position: relative;
           animation: cut-border-pulse 1.5s ease-in-out infinite;
+          box-shadow: inset 0 0 0 2px #d73502;
+        }
+        
+        .cell.cut::before {
+          content: '';
+          position: absolute;
+          top: -1px;
+          left: -1px;
+          right: -1px;
+          bottom: -1px;
+          border: 2px dotted #d73502;
+          pointer-events: none;
+          z-index: 1;
         }
         
         .cell.cut::after {
@@ -2172,7 +2457,20 @@ const ExcelSpreadsheet: React.FC = memo(() => {
         
         .cell.fill-preview {
           background: rgba(33, 115, 70, 0.2) !important;
-          border: 1px dashed #217346 !important;
+          border: 1px solid #d4d4d4 !important;
+          box-shadow: inset 0 0 0 1px #217346;
+        }
+        
+        .cell.fill-preview::before {
+          content: '';
+          position: absolute;
+          top: 0;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          border: 1px dashed #217346;
+          pointer-events: none;
+          z-index: 1;
         }
 
         
@@ -2215,12 +2513,18 @@ const ExcelSpreadsheet: React.FC = memo(() => {
           height: 100%;
           cursor: col-resize;
           background: transparent;
-          z-index: 10;
+          z-index: 200;
+          opacity: 0;
+          transition: opacity 0.2s ease, background-color 0.2s ease;
+        }
+        
+        .column-header:hover .column-resize-handle {
+          opacity: 1;
         }
         
         .column-resize-handle:hover {
           background: #217346;
-          opacity: 0.7;
+          opacity: 1;
         }
         
         /* Row resize handle styles */
@@ -2232,12 +2536,18 @@ const ExcelSpreadsheet: React.FC = memo(() => {
           height: 4px;
           cursor: row-resize;
           background: transparent;
-          z-index: 10;
+          z-index: 200;
+          opacity: 0;
+          transition: opacity 0.2s ease, background-color 0.2s ease;
+        }
+        
+        .row-header:hover .row-resize-handle {
+          opacity: 1;
         }
         
         .row-resize-handle:hover {
           background: #217346;
-          opacity: 0.7;
+          opacity: 1;
         }
         
         /* Header styles for resizing */
@@ -2379,99 +2689,140 @@ const ExcelSpreadsheet: React.FC = memo(() => {
           }
         }
         
-        /* Enhanced copy/cut cell animations */
-        .cell.copied {
-          border: 2px dashed #0078d4 !important;
-          z-index: 30;
-          position: relative;
-          animation: copied-border-pulse 2s ease-in-out infinite;
-          box-shadow: 0 0 0 1px rgba(0, 120, 212, 0.3) !important;
+        /* Enhanced copy/cut cell animations - these override the previous definitions */
+        
+
+
+        /* Ensure grid lines are always visible */
+        .cell, .cell.selected, .cell.primary-selected, .cell.copied, .cell.cut, .cell.fill-preview {
+          border-collapse: collapse;
         }
         
-        .cell.copied::after {
-          content: '';
-          position: absolute;
-          top: 0;
-          left: 0;
-          right: 0;
-          bottom: 0;
-          background: rgba(0, 120, 212, 0.15);
+        /* Ensure proper grid line inheritance with containment */
+        .spreadsheet-table td {
+          border: 1px solid #d4d4d4 !important;
+          border-collapse: collapse;
+          box-sizing: border-box;
+        }
+        
+        .spreadsheet-table th {
+          border: 1px solid #a6a6a6 !important;
+          border-collapse: collapse;
+          box-sizing: border-box;
+        }
+        
+        /* Table row containment for performance */
+        .spreadsheet-table tbody tr {
+          contain: layout style;
+          content-visibility: auto;
+          contain-intrinsic-size: auto 20px;
+        }
+        
+        .spreadsheet-table thead tr {
+          contain: layout style;
+          contain-intrinsic-size: auto 20px;
+        }
+        
+        /* Spacer element styles for optimal performance */
+        .cell-spacer {
           pointer-events: none;
-          z-index: 1;
-          animation: copied-pulse-overlay 2s ease-in-out infinite;
+          user-select: none;
+          cursor: default;
+          contain: layout style;
+          transform: translateZ(0);
+          will-change: auto;
+          border: 1px solid #d4d4d4 !important;
+          box-sizing: border-box;
         }
         
-        .cell.cut {
-          border: 2px dotted #d73502 !important;
-          z-index: 30;
-          position: relative;
-          animation: cut-border-pulse 1.5s ease-in-out infinite;
-          box-shadow: 0 0 0 1px rgba(215, 53, 2, 0.3) !important;
-        }
-        
-        .cell.cut::after {
-          content: '';
-          position: absolute;
-          top: 0;
-          left: 0;
-          right: 0;
-          bottom: 0;
-          background: rgba(215, 53, 2, 0.1);
+        .column-header-spacer {
           pointer-events: none;
-          z-index: 1;
-          animation: cut-pulse-overlay 1.5s ease-in-out infinite;
+          user-select: none;
+          cursor: default;
+          contain: layout style;
+          transform: translateZ(0);
+          will-change: auto;
+          border: 1px solid #a6a6a6 !important;
+          box-sizing: border-box;
+        }
+
+        /* Hyperlink hover tooltip styles */
+        .cell-content[title]:hover {
+          position: relative;
+        }
+
+        .cell-content[title]:hover::after {
+          content: attr(title);
+          position: absolute;
+          bottom: 100%;
+          left: 50%;
+          transform: translateX(-50%);
+          background: rgba(0, 0, 0, 0.9);
+          color: white;
+          padding: 6px 10px;
+          border-radius: 4px;
+          font-size: 11px;
+          white-space: nowrap;
+          z-index: 1000;
+          pointer-events: none;
+          opacity: 0;
+          animation: fadeInTooltip 0.2s ease-in-out 0.5s forwards;
+          box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+        }
+
+        @keyframes fadeInTooltip {
+          from { 
+            opacity: 0;
+            transform: translateX(-50%) translateY(5px);
+          }
+          to { 
+            opacity: 1;
+            transform: translateX(-50%) translateY(0);
+          }
         }
       `}</style>
       
       <div className="spreadsheet-table-container" ref={scrollContainerRef}>
         <table className="spreadsheet-table">
-          {/* Virtual scrolling container - maintains total grid size */}
-          <colgroup>
-            <col style={{ width: '42px' }} />
-            {(() => {
-              const viewport = calculateViewport;
-              const cols = [];
-              
-              // Add spacer columns before visible area
-              if (viewport.startCol > 0) {
-                const spacerWidth = viewport.startCol * DEFAULT_COLUMN_WIDTH;
-                cols.push(<col key="spacer-left" style={{ width: `${spacerWidth}px` }} />);
-              }
-              
-              // Add visible columns
-              for (let i = viewport.startCol; i < viewport.endCol; i++) {
-                cols.push(<col key={i} style={{ width: `${getCurrentColumnWidth(i)}px` }} />);
-              }
-              
-              // Add spacer columns after visible area
-              const remainingCols = visibleCols - viewport.endCol;
-              if (remainingCols > 0) {
-                const spacerWidth = remainingCols * DEFAULT_COLUMN_WIDTH;
-                cols.push(<col key="spacer-right" style={{ width: `${spacerWidth}px` }} />);
-              }
-              
-              return cols;
-            })()}
-          </colgroup>
           
           {/* Header row */}
           <thead>
             <tr className="header-row">
-              <th className="row-col-header"></th>
+              <th 
+                className="row-col-header"
+                onClick={handleSelectAllClick}
+                style={{ cursor: 'pointer' }}
+                title="Select all cells"
+              ></th>
               {(() => {
                 const viewport = calculateViewport;
                 const headers = [];
                 const highlightedColumns = getHighlightedColumns;
                 
-                // Add spacer header for left offset
-                if (viewport.startCol > 0) {
+                // Use buffered rendering for consistency
+                const renderBuffer = shouldUseVirtualScrolling ? RENDER_BUFFER : 0;
+                const renderStartCol = Math.max(0, viewport.startCol - renderBuffer);
+                const renderEndCol = Math.min(visibleCols, viewport.endCol + renderBuffer);
+                
+                // Add spacer header for left offset if needed
+                if (renderStartCol > 0) {
+                  const spacerWidth = renderStartCol * DEFAULT_COLUMN_WIDTH;
                   headers.push(
-                    <th key="spacer-left" style={{ width: `${viewport.startCol * DEFAULT_COLUMN_WIDTH}px`, border: 'none', background: 'transparent' }}></th>
+                    <th 
+                      key="spacer-left" 
+                      className="column-header-spacer"
+                      style={{ 
+                        width: `${spacerWidth}px`,
+                        border: '1px solid #a6a6a6',
+                        background: 'linear-gradient(180deg, #f0f0f0 0%, #d0d0d0 100%)',
+                        padding: '4px 6px'
+                      }}
+                    ></th>
                   );
                 }
                 
-                // Add visible column headers
-                for (let i = viewport.startCol; i < viewport.endCol; i++) {
+                // Render buffered column headers
+                for (let i = renderStartCol; i < renderEndCol; i++) {
                   const isHighlighted = highlightedColumns.has(i);
                   headers.push(
                     <th 
@@ -2480,8 +2831,11 @@ const ExcelSpreadsheet: React.FC = memo(() => {
                       style={{ 
                         width: getCurrentColumnWidth(i),
                         minWidth: MIN_COLUMN_WIDTH,
-                        position: 'relative'
+                        position: 'relative',
+                        cursor: 'pointer'
                       }}
+                      onClick={(e) => handleColumnHeaderClick(i, e)}
+                      title={`Select column ${generateColumnLabel(i)}`}
                     >
                       {generateColumnLabel(i)}
                       <div 
@@ -2492,11 +2846,21 @@ const ExcelSpreadsheet: React.FC = memo(() => {
                   );
                 }
                 
-                // Add spacer header for right offset
-                const remainingCols = visibleCols - viewport.endCol;
-                if (remainingCols > 0) {
+                // Add spacer header for right offset if needed
+                if (renderEndCol < visibleCols) {
+                  const remainingCols = visibleCols - renderEndCol;
+                  const spacerWidth = remainingCols * DEFAULT_COLUMN_WIDTH;
                   headers.push(
-                    <th key="spacer-right" style={{ width: `${remainingCols * DEFAULT_COLUMN_WIDTH}px`, border: 'none', background: 'transparent' }}></th>
+                    <th 
+                      key="spacer-right" 
+                      className="column-header-spacer"
+                      style={{ 
+                        width: `${spacerWidth}px`,
+                        border: '1px solid #a6a6a6',
+                        background: 'linear-gradient(180deg, #f0f0f0 0%, #d0d0d0 100%)',
+                        padding: '4px 6px'
+                      }}
+                    ></th>
                   );
                 }
                 
@@ -2512,18 +2876,40 @@ const ExcelSpreadsheet: React.FC = memo(() => {
               const rows = [];
               const highlightedRows = getHighlightedRows;
               
-              // Add spacer row for top offset (invisible rows above viewport)
-              if (viewport.startRow > 0) {
-                const spacerHeight = viewport.startRow * DEFAULT_ROW_HEIGHT;
+              // Use buffered rendering for better performance
+              const renderBuffer = shouldUseVirtualScrolling ? RENDER_BUFFER : 0;
+              const renderStartRow = Math.max(0, viewport.startRow - renderBuffer);
+              const renderEndRow = Math.min(visibleRows, viewport.endRow + renderBuffer);
+              const renderStartCol = Math.max(0, viewport.startCol - renderBuffer);
+              const renderEndCol = Math.min(visibleCols, viewport.endCol + renderBuffer);
+              
+              // Add spacer row for top offset if needed
+              if (renderStartRow > 0) {
+                const spacerHeight = renderStartRow * DEFAULT_ROW_HEIGHT;
                 rows.push(
                   <tr key="spacer-top" style={{ height: `${spacerHeight}px` }}>
-                    <td colSpan={visibleCols + 1} style={{ border: 'none', padding: 0 }}></td>
+                    <td className="row-header" style={{ 
+                      border: '1px solid #a6a6a6',
+                      background: 'linear-gradient(180deg, #f0f0f0 0%, #d0d0d0 100%)',
+                      padding: '4px 6px'
+                    }}></td>
+                    {Array.from({ length: visibleCols }, (_, colIndex) => (
+                      <td 
+                        key={`spacer-top-${colIndex}`}
+                        className="cell-spacer"
+                        style={{ 
+                          width: getCurrentColumnWidth(colIndex),
+                          border: '1px solid #d4d4d4',
+                          background: 'white'
+                        }}
+                      ></td>
+                    ))}
                   </tr>
                 );
               }
               
-              // Render visible rows
-              for (let row = viewport.startRow; row < viewport.endRow; row++) {
+              // Render buffered rows
+              for (let row = renderStartRow; row < renderEndRow; row++) {
                 const isRowHighlighted = highlightedRows.has(row);
                 const rowCells = [];
                 
@@ -2534,8 +2920,12 @@ const ExcelSpreadsheet: React.FC = memo(() => {
                     className={`row-header ${isRowHighlighted ? 'highlighted' : ''}`}
                     style={{ 
                       position: 'relative',
-                      height: getCurrentRowHeight(row)
+                      height: getCurrentRowHeight(row),
+                      minHeight: MIN_ROW_HEIGHT,
+                      cursor: 'pointer'
                     }}
+                    onClick={(e) => handleRowHeaderClick(row, e)}
+                    title={`Select row ${row + 1}`}
                   >
                     {row + 1}
                     <div 
@@ -2545,15 +2935,25 @@ const ExcelSpreadsheet: React.FC = memo(() => {
                   </td>
                 );
                 
-                // Add spacer cell for left offset (invisible columns)
-                if (viewport.startCol > 0) {
+                // Add spacer cell for left offset if needed
+                if (renderStartCol > 0) {
+                  const spacerWidth = renderStartCol * DEFAULT_COLUMN_WIDTH;
                   rowCells.push(
-                    <td key="cell-spacer-left" style={{ width: `${viewport.startCol * DEFAULT_COLUMN_WIDTH}px`, border: 'none', padding: 0 }}></td>
+                    <td 
+                      key="cell-spacer-left"
+                      className="cell-spacer"
+                      style={{ 
+                        width: `${spacerWidth}px`,
+                        height: getCurrentRowHeight(row),
+                        border: '1px solid #d4d4d4',
+                        background: 'white'
+                      }}
+                    ></td>
                   );
                 }
                 
-                // Render visible cells in this row
-                for (let col = viewport.startCol; col < viewport.endCol; col++) {
+                // Render buffered cells in this row
+                for (let col = renderStartCol; col < renderEndCol; col++) {
                   const cell = renderCell(row, col);
                   rowCells.push(React.cloneElement(cell, {
                     key: `cell-${col}`,
@@ -2567,11 +2967,21 @@ const ExcelSpreadsheet: React.FC = memo(() => {
                   }));
                 }
                 
-                // Add spacer cell for right offset (invisible columns)
-                const remainingCols = visibleCols - viewport.endCol;
-                if (remainingCols > 0) {
+                // Add spacer cell for right offset if needed
+                if (renderEndCol < visibleCols) {
+                  const remainingCols = visibleCols - renderEndCol;
+                  const spacerWidth = remainingCols * DEFAULT_COLUMN_WIDTH;
                   rowCells.push(
-                    <td key="cell-spacer-right" style={{ width: `${remainingCols * DEFAULT_COLUMN_WIDTH}px`, border: 'none', padding: 0 }}></td>
+                    <td 
+                      key="cell-spacer-right"
+                      className="cell-spacer"
+                      style={{ 
+                        width: `${spacerWidth}px`,
+                        height: getCurrentRowHeight(row),
+                        border: '1px solid #d4d4d4',
+                        background: 'white'
+                      }}
+                    ></td>
                   );
                 }
                 
@@ -2588,13 +2998,28 @@ const ExcelSpreadsheet: React.FC = memo(() => {
                 );
               }
               
-              // Add spacer row for bottom offset (invisible rows below viewport)
-              const remainingRows = visibleRows - viewport.endRow;
-              if (remainingRows > 0) {
+              // Add spacer row for bottom offset if needed
+              if (renderEndRow < visibleRows) {
+                const remainingRows = visibleRows - renderEndRow;
                 const spacerHeight = remainingRows * DEFAULT_ROW_HEIGHT;
                 rows.push(
                   <tr key="spacer-bottom" style={{ height: `${spacerHeight}px` }}>
-                    <td colSpan={visibleCols + 1} style={{ border: 'none', padding: 0 }}></td>
+                    <td className="row-header" style={{ 
+                      border: '1px solid #a6a6a6',
+                      background: 'linear-gradient(180deg, #f0f0f0 0%, #d0d0d0 100%)',
+                      padding: '4px 6px'
+                    }}></td>
+                    {Array.from({ length: visibleCols }, (_, colIndex) => (
+                      <td 
+                        key={`spacer-bottom-${colIndex}`}
+                        className="cell-spacer"
+                        style={{ 
+                          width: getCurrentColumnWidth(colIndex),
+                          border: '1px solid #d4d4d4',
+                          background: 'white'
+                        }}
+                      ></td>
+                    ))}
                   </tr>
                 );
               }
