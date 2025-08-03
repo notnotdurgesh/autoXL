@@ -1,9 +1,24 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
 import { useUndoRedo, type Command } from '../hooks/useUndoRedo';
+import ExcelToolbar from './ExcelToolbar';
+import { createOptimizedHandler, runWhenIdle } from '../utills/performanceUtil';
+
+interface CellFormatting {
+  fontFamily?: string;
+  fontSize?: number;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  textAlign?: 'left' | 'center' | 'right' | 'justify';
+  verticalAlign?: 'top' | 'middle' | 'bottom';
+  color?: string;
+  backgroundColor?: string;
+}
 
 interface CellData {
   value: string | number | null;
   isEditing?: boolean;
+  formatting?: CellFormatting;
 }
 
 interface SheetData {
@@ -19,13 +34,17 @@ interface CellRange {
   endCol: number;
 }
 
-const ExcelSpreadsheet: React.FC = () => {
-  const INITIAL_ROWS = 30;
-const INITIAL_COLS = 15;
-const DEFAULT_COLUMN_WIDTH = 80;
-const DEFAULT_ROW_HEIGHT = 20;
-const MIN_COLUMN_WIDTH = 30;
-const MIN_ROW_HEIGHT = 15; // A-Z columns
+const ExcelSpreadsheet: React.FC = memo(() => {
+  // Excel-like limits and defaults
+  const MAX_ROWS = 1048576; // Excel's row limit
+  const MAX_COLS = 16384; // Excel's column limit (XFD)
+  const MIN_VISIBLE_ROWS = 50; // Minimum rows to always show
+  const MIN_VISIBLE_COLS = 26; // Minimum columns to always show (A-Z)
+  const EXPANSION_BUFFER = 10; // Extra rows/cols to add when expanding
+  const DEFAULT_COLUMN_WIDTH = 80;
+  const DEFAULT_ROW_HEIGHT = 20;
+  const MIN_COLUMN_WIDTH = 30;
+  const MIN_ROW_HEIGHT = 15;
   const [sheetData, setSheetData] = useState<SheetData>({});
   const [selectedCell, setSelectedCell] = useState<{row: number, col: number} | null>(null);
   const [selectedRange, setSelectedRange] = useState<CellRange | null>(null);
@@ -33,6 +52,32 @@ const MIN_ROW_HEIGHT = 15; // A-Z columns
   const [inputValue, setInputValue] = useState<string>('');
   const [isSelecting, setIsSelecting] = useState<boolean>(false);
   const [copiedData, setCopiedData] = useState<{data: CellData[][], range: CellRange, isCut?: boolean} | null>(null);
+  
+  // Enhanced state for clipboard operations
+  const [clipboardNotification, setClipboardNotification] = useState<string | null>(null);
+  
+  // Dynamic grid size state - starts with minimum but expands as needed
+  const [visibleRows, setVisibleRows] = useState<number>(MIN_VISIBLE_ROWS);
+  const [visibleCols, setVisibleCols] = useState<number>(MIN_VISIBLE_COLS);
+  
+  // Zoom functionality state
+  const [zoomLevel] = useState<number>(100); // Percentage
+  
+  // Virtual scrolling and performance optimization
+  const MAX_RENDERED_ROWS = 100; // Maximum rows to render at once
+  const MAX_RENDERED_COLS = 50;  // Maximum columns to render at once
+  const RENDER_BUFFER = 5;       // Extra rows/cols to render outside viewport
+  const PERFORMANCE_THRESHOLD = 10000; // Max cells before virtual scrolling kicks in
+  
+  // Virtual viewport state
+  const [viewportStartRow, setViewportStartRow] = useState<number>(0);
+  const [viewportStartCol, setViewportStartCol] = useState<number>(0);
+  const [viewportEndRow, setViewportEndRow] = useState<number>(MAX_RENDERED_ROWS);
+  const [viewportEndCol, setViewportEndCol] = useState<number>(MAX_RENDERED_COLS);
+
+  
+  // Scroll position tracking
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const cursorPositionRef = useRef<number>(0);
   
@@ -53,6 +98,8 @@ const MIN_ROW_HEIGHT = 15; // A-Z columns
   
   // Undo/Redo functionality
   const { executeCommand, undo, redo, canUndo, canRedo } = useUndoRedo();
+  
+  // Cell formatting state
 
   // Helper functions to get current sizes (including temporary values during resize)
   const getCurrentColumnWidth = useCallback((colIndex: number) => {
@@ -70,19 +117,151 @@ const MIN_ROW_HEIGHT = 15; // A-Z columns
   }, [rowHeights, tempRowHeights, isResizingRow]);
 
   // Generate column labels A, B, C, ..., Z, AA, AB, etc.
-  const generateColumnLabel = useCallback((index: number): string => {
-    let result = '';
-    let temp = index;
-    while (temp >= 0) {
-      result = String.fromCharCode(65 + (temp % 26)) + result;
-      temp = Math.floor(temp / 26) - 1;
-    }
-    return result;
+  const generateColumnLabel = useMemo(() => {
+    const cache = new Map<number, string>();
+    return (index: number): string => {
+      if (cache.has(index)) return cache.get(index)!;
+      
+      let result = '';
+      let temp = index;
+      while (temp >= 0) {
+        result = String.fromCharCode(65 + (temp % 26)) + result;
+        temp = Math.floor(temp / 26) - 1;
+      }
+      cache.set(index, result);
+      return result;
+    };
   }, []);
 
-  // Initialize with sample data
+  // Grid expansion functions - Excel-like behavior
+
+
+  // Smart grid expansion with performance awareness - PRESERVES ALL DATA
+  const smartExpandGrid = useCallback((targetRow: number, targetCol: number) => {
+    // If we're already at performance threshold, be more conservative  
+    const maxSafeExpansion = EXPANSION_BUFFER;
+    
+    const requiredRows = Math.max(
+      MIN_VISIBLE_ROWS,
+      Math.min(targetRow + maxSafeExpansion, MAX_ROWS)
+    );
+    const requiredCols = Math.max(
+      MIN_VISIBLE_COLS, 
+      Math.min(targetCol + maxSafeExpansion, MAX_COLS)
+    );
+
+    // Only expand if we really need to
+    if (requiredRows > visibleRows || requiredCols > visibleCols) {
+      const newRows = Math.max(visibleRows, requiredRows);
+      const newCols = Math.max(visibleCols, requiredCols);
+      
+      // Prevent explosive growth
+      const safeTotalCells = newRows * newCols;
+      if (safeTotalCells > PERFORMANCE_THRESHOLD * 4) {
+        console.warn('Grid expansion limited for performance');
+        return false;
+      }
+      
+      // CRITICAL: Grid expansion ONLY changes visible bounds, NEVER touches sheetData
+      if (newRows > visibleRows) setVisibleRows(newRows);
+      if (newCols > visibleCols) setVisibleCols(newCols);
+      
+      return true;
+    }
+    
+    return false;
+  }, [visibleRows, visibleCols, MIN_VISIBLE_ROWS, MIN_VISIBLE_COLS, MAX_ROWS, MAX_COLS, EXPANSION_BUFFER, PERFORMANCE_THRESHOLD]);
+
+  // Define shouldUseVirtualScrolling before using it (memoized for performance)
+  const shouldUseVirtualScrolling = useMemo(() => {
+    return (visibleRows * visibleCols) > PERFORMANCE_THRESHOLD;
+  }, [visibleRows, visibleCols]);
+
+  // Smart auto-expansion with performance awareness
+  const handleAutoExpansion = useCallback((row: number, col: number) => {
+    // Expand if we're within 5 rows/cols of the edge or beyond current bounds
+    const shouldExpand = (
+      row >= visibleRows - 5 || 
+      col >= visibleCols - 5 || 
+      row >= visibleRows || 
+      col >= visibleCols
+    );
+    
+    if (shouldExpand) {
+      smartExpandGrid(row, col);
+    }
+  }, [visibleRows, visibleCols, smartExpandGrid]);
+
+  // Virtual scrolling calculations - PERFORMANCE OPTIMIZATION (memoized)
+  const calculateViewport = useMemo(() => {
+    if (!shouldUseVirtualScrolling) {
+      // If grid is small enough, render everything
+      return {
+        startRow: 0,
+        endRow: visibleRows,
+        startCol: 0,
+        endCol: visibleCols,
+        totalRowHeight: visibleRows * DEFAULT_ROW_HEIGHT,
+        totalColWidth: visibleCols * DEFAULT_COLUMN_WIDTH
+      };
+    }
+
+    const container = scrollContainerRef.current;
+    if (!container) {
+      return {
+        startRow: viewportStartRow,
+        endRow: viewportEndRow,
+        startCol: viewportStartCol,
+        endCol: viewportEndCol,
+        totalRowHeight: visibleRows * DEFAULT_ROW_HEIGHT,
+        totalColWidth: visibleCols * DEFAULT_COLUMN_WIDTH
+      };
+    }
+
+    const { scrollTop, scrollLeft, clientHeight, clientWidth } = container;
+    const zoomFactor = zoomLevel / 100;
+
+    // Calculate which rows are visible
+    const startRow = Math.max(0, Math.floor(scrollTop / (DEFAULT_ROW_HEIGHT * zoomFactor)) - RENDER_BUFFER);
+    const endRow = Math.min(visibleRows, startRow + Math.ceil(clientHeight / (DEFAULT_ROW_HEIGHT * zoomFactor)) + RENDER_BUFFER * 2);
+
+    // Calculate which columns are visible  
+    const startCol = Math.max(0, Math.floor(scrollLeft / (DEFAULT_COLUMN_WIDTH * zoomFactor)) - RENDER_BUFFER);
+    const endCol = Math.min(visibleCols, startCol + Math.ceil(clientWidth / (DEFAULT_COLUMN_WIDTH * zoomFactor)) + RENDER_BUFFER * 2);
+
+    return {
+      startRow,
+      endRow: Math.min(endRow, startRow + MAX_RENDERED_ROWS),
+      startCol,
+      endCol: Math.min(endCol, startCol + MAX_RENDERED_COLS),
+      totalRowHeight: visibleRows * DEFAULT_ROW_HEIGHT,
+      totalColWidth: visibleCols * DEFAULT_COLUMN_WIDTH
+    };
+  }, [shouldUseVirtualScrolling, visibleRows, visibleCols, viewportStartRow, viewportEndRow, viewportStartCol, viewportEndCol, zoomLevel]);
+
+  // Update viewport when scrolling (optimized with RAF)
+  const updateViewport = useCallback(() => {
+    const viewport = calculateViewport;
+    
+    if (viewport.startRow !== viewportStartRow || viewport.endRow !== viewportEndRow ||
+        viewport.startCol !== viewportStartCol || viewport.endCol !== viewportEndCol) {
+      
+      // Use requestAnimationFrame for smoother updates
+      requestAnimationFrame(() => {
+        setViewportStartRow(viewport.startRow);
+        setViewportEndRow(viewport.endRow);
+        setViewportStartCol(viewport.startCol);
+        setViewportEndCol(viewport.endCol);
+      });
+    }
+  }, [calculateViewport, viewportStartRow, viewportEndRow, viewportStartCol, viewportEndCol]);
+
+
+  // Initialize with sample data using performance optimization - ONLY ONCE
   useEffect(() => {
-    const initialData: SheetData = {};
+    // Defer initial data setup to improve initial render performance
+    runWhenIdle(() => {
+      const initialData: SheetData = {};
     
     // Set sample data exactly as in the original
     const setInitialCellValue = (row: number, col: number, value: string | number) => {
@@ -138,8 +317,80 @@ const MIN_ROW_HEIGHT = 15; // A-Z columns
     setInitialCellValue(7, 4, 23.08);
     setInitialCellValue(7, 5, 16.09);
 
-    setSheetData(initialData);
-  }, []);
+      setSheetData(initialData);
+    }, 10, 1000);
+  }, []); // FIXED: Empty dependency array so this only runs once on mount
+
+  // Smart scroll handling with virtual scrolling and performance optimization (optimized)
+  useEffect(() => {
+    const handleScroll = (e: Event) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest('.spreadsheet-table-container')) return;
+      
+      const container = target.closest('.spreadsheet-table-container') as HTMLElement;
+      if (!container) return;
+      
+      // Update virtual viewport for performance
+      if (shouldUseVirtualScrolling) {
+        updateViewport();
+      }
+      
+      const { scrollTop, scrollHeight, clientHeight, scrollLeft, scrollWidth, clientWidth } = container;
+      
+      // Calculate scroll percentages
+      const verticalScrollPercent = (scrollTop + clientHeight) / scrollHeight;
+      const horizontalScrollPercent = (scrollLeft + clientWidth) / scrollWidth;
+      
+      // Smart expansion - more conservative when performance is a concern
+      const threshold = shouldUseVirtualScrolling ? 0.95 : 0.9; // Higher threshold when using virtual scrolling
+      
+      // Only expand if we're not already at performance limits
+      if (verticalScrollPercent > threshold && visibleRows < MAX_ROWS) {
+        const currentCellCount = visibleRows * visibleCols;
+        if (currentCellCount < PERFORMANCE_THRESHOLD * 2) { // Safety check
+          smartExpandGrid(visibleRows, visibleCols);
+        }
+      }
+      
+      if (horizontalScrollPercent > threshold && visibleCols < MAX_COLS) {
+        const currentCellCount = visibleRows * visibleCols;
+        if (currentCellCount < PERFORMANCE_THRESHOLD * 2) { // Safety check
+          smartExpandGrid(visibleRows, visibleCols);
+        }
+      }
+    };
+
+    // Use modern performance-optimized scroll handler
+    const optimizedHandleScroll = createOptimizedHandler(handleScroll as (...args: unknown[]) => void, {
+      throttle: true,
+      useRAF: true
+    });
+
+    document.addEventListener('scroll', optimizedHandleScroll, { passive: true, capture: true });
+    
+    return () => {
+      document.removeEventListener('scroll', optimizedHandleScroll, true);
+    };
+  }, [visibleRows, visibleCols, shouldUseVirtualScrolling, updateViewport, smartExpandGrid]);
+
+  // Container resize observer for virtual scrolling
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+
+    const resizeObserver = new ResizeObserver(() => {
+      // Update viewport when container size changes
+      if (shouldUseVirtualScrolling) {
+        updateViewport();
+      }
+    });
+
+    resizeObserver.observe(container);
+
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, [shouldUseVirtualScrolling, updateViewport]);
 
 
 
@@ -151,14 +402,20 @@ const MIN_ROW_HEIGHT = 15; // A-Z columns
 
   // Internal function to set cell value directly (used by commands)
   const setCellValueDirect = useCallback((row: number, col: number, value: string | number) => {
+    // Auto-expand grid if needed when setting cell values
+    handleAutoExpansion(row, col);
+    
     setSheetData(prev => ({
       ...prev,
       [row]: {
         ...prev[row],
-        [col]: { value }
+        [col]: { 
+          ...prev[row]?.[col],
+          value 
+        }
       }
     }));
-  }, []);
+  }, [handleAutoExpansion]);
 
   // Create an undoable command for setting cell value
   const setCellValue = useCallback((row: number, col: number, newValue: string | number, description?: string) => {
@@ -176,36 +433,36 @@ const MIN_ROW_HEIGHT = 15; // A-Z columns
     executeCommand(command);
   }, [setCellValueDirect, getCellValue, executeCommand, generateColumnLabel]);
 
-  const isCellInRange = (row: number, col: number, range: CellRange | null): boolean => {
+  const isCellInRange = useCallback((row: number, col: number, range: CellRange | null): boolean => {
     if (!range) return false;
     const minRow = Math.min(range.startRow, range.endRow);
     const maxRow = Math.max(range.startRow, range.endRow);
     const minCol = Math.min(range.startCol, range.endCol);
     const maxCol = Math.max(range.startCol, range.endCol);
     return row >= minRow && row <= maxRow && col >= minCol && col <= maxCol;
-  };
+  }, []);
 
-  const isCellSelected = (row: number, col: number): boolean => {
+  const isCellSelected = useCallback((row: number, col: number): boolean => {
     if (selectedRange) {
       return isCellInRange(row, col, selectedRange);
     }
     return selectedCell?.row === row && selectedCell?.col === col;
-  };
+  }, [selectedRange, selectedCell, isCellInRange]);
 
-  const isCellCopied = (row: number, col: number): boolean => {
+  const isCellCopied = useCallback((row: number, col: number): boolean => {
     if (!copiedData) return false;
     return isCellInRange(row, col, copiedData.range);
-  };
+  }, [copiedData, isCellInRange]);
 
-  const isCellCut = (row: number, col: number): boolean => {
+  const isCellCut = useCallback((row: number, col: number): boolean => {
     if (!copiedData || !copiedData.isCut) return false;
     return isCellInRange(row, col, copiedData.range);
-  };
+  }, [copiedData, isCellInRange]);
 
-  const isCellInFillPreview = (row: number, col: number): boolean => {
+  const isCellInFillPreview = useCallback((row: number, col: number): boolean => {
     if (!fillPreview) return false;
     return isCellInRange(row, col, fillPreview);
-  };
+  }, [fillPreview, isCellInRange]);
 
 
 
@@ -411,9 +668,51 @@ const MIN_ROW_HEIGHT = 15; // A-Z columns
     return selectedCell ? [selectedCell] : [];
   }, [selectedCell, selectedRange]);
 
+  // Get highlighted columns and rows based on selection (memoized for performance)
+  const getHighlightedColumns = useMemo((): Set<number> => {
+    const highlightedCols = new Set<number>();
+    
+    if (selectedRange) {
+      const minCol = Math.min(selectedRange.startCol, selectedRange.endCol);
+      const maxCol = Math.max(selectedRange.startCol, selectedRange.endCol);
+      for (let col = minCol; col <= maxCol; col++) {
+        highlightedCols.add(col);
+      }
+    } else if (selectedCell) {
+      highlightedCols.add(selectedCell.col);
+    }
+    
+    return highlightedCols;
+  }, [selectedCell, selectedRange]);
+
+  const getHighlightedRows = useMemo((): Set<number> => {
+    const highlightedRows = new Set<number>();
+    
+    if (selectedRange) {
+      const minRow = Math.min(selectedRange.startRow, selectedRange.endRow);
+      const maxRow = Math.max(selectedRange.startRow, selectedRange.endRow);
+      for (let row = minRow; row <= maxRow; row++) {
+        highlightedRows.add(row);
+      }
+    } else if (selectedCell) {
+      highlightedRows.add(selectedCell.row);
+    }
+    
+    return highlightedRows;
+  }, [selectedCell, selectedRange]);
+
+  // Clipboard notification helper
+  const showClipboardNotification = useCallback((message: string) => {
+    setClipboardNotification(message);
+    setTimeout(() => setClipboardNotification(null), 3000);
+  }, []);
+
   const copySelectedCells = useCallback((isCut: boolean = false) => {
     const selectedCells = getSelectedCells();
-    if (selectedCells.length === 0) return;
+    if (selectedCells.length === 0) {
+      showClipboardNotification('No cells selected to copy');
+      return;
+    }
 
     let minRow = selectedCells[0].row;
     let maxRow = selectedCells[0].row;
@@ -449,6 +748,15 @@ const MIN_ROW_HEIGHT = 15; // A-Z columns
 
     setCopiedData({ data, range: copiedRange, isCut });
 
+    // Show notification
+    const cellCount = selectedCells.length;
+    const rangeText = cellCount === 1 
+      ? `${generateColumnLabel(minCol)}${minRow + 1}`
+      : `${generateColumnLabel(minCol)}${minRow + 1}:${generateColumnLabel(maxCol)}${maxRow + 1}`;
+    
+    const action = isCut ? 'Cut' : 'Copied';
+    showClipboardNotification(`${action} ${cellCount} cell${cellCount > 1 ? 's' : ''} (${rangeText})`);
+
     // Auto-clear styling after 3 seconds for copy, or keep until paste for cut
     if (!isCut) {
       setTimeout(() => {
@@ -472,10 +780,10 @@ const MIN_ROW_HEIGHT = 15; // A-Z columns
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(textData).catch(() => {
         // Fallback if clipboard API fails
-        console.log('Clipboard API failed, data copied internally');
+        showClipboardNotification('System clipboard unavailable, data copied internally');
       });
     }
-  }, [getSelectedCells, getCellValue]);
+  }, [getSelectedCells, getCellValue, generateColumnLabel, showClipboardNotification]);
 
   const cutSelectedCells = useCallback(() => {
     copySelectedCells(true);
@@ -597,11 +905,25 @@ const MIN_ROW_HEIGHT = 15; // A-Z columns
   }, [selectedCell, getCellValue, setCellValueDirect, executeCommand, generateColumnLabel, copiedData]);
 
   const pasteData = useCallback(() => {
-    if (!copiedData || !selectedCell) return;
+    if (!copiedData || !selectedCell) {
+      showClipboardNotification('No data to paste');
+      return;
+    }
 
     const startRow = selectedCell.row;
     const startCol = selectedCell.col;
     const { data, range, isCut } = copiedData;
+
+    // Calculate paste area
+    const pasteRows = data.length;
+    const pasteCols = data[0]?.length || 0;
+    const pasteEndRow = startRow + pasteRows - 1;
+    const pasteEndCol = startCol + pasteCols - 1;
+
+    // Show notification
+    const pasteRangeText = `${generateColumnLabel(startCol)}${startRow + 1}:${generateColumnLabel(pasteEndCol)}${pasteEndRow + 1}`;
+    const cellCount = pasteRows * pasteCols;
+    showClipboardNotification(`Pasted ${cellCount} cell${cellCount > 1 ? 's' : ''} to ${pasteRangeText}`);
 
     // Get original values that will be overwritten
     const originalValues: Array<{row: number, col: number, value: string | number}> = [];
@@ -691,7 +1013,7 @@ const MIN_ROW_HEIGHT = 15; // A-Z columns
     };
 
     executeCommand(command);
-  }, [copiedData, selectedCell, getCellValue, setCellValueDirect, executeCommand, generateColumnLabel]);
+  }, [copiedData, selectedCell, getCellValue, setCellValueDirect, executeCommand, generateColumnLabel, showClipboardNotification]);
 
   const deleteSelectedCells = useCallback(() => {
     const selectedCells = getSelectedCells();
@@ -731,51 +1053,140 @@ const MIN_ROW_HEIGHT = 15; // A-Z columns
     setSelectedRange({
       startRow: 0,
       startCol: 0,
-      endRow: INITIAL_ROWS - 1,
-      endCol: INITIAL_COLS - 1
+      endRow: visibleRows - 1,
+      endCol: visibleCols - 1
     });
     setSelectedCell({ row: 0, col: 0 });
-  }, []);
+  }, [visibleRows, visibleCols]);
+
+  const commitEdit = useCallback(() => {
+    if (editingCell) {
+      const numValue = Number(inputValue);
+      const finalValue = !isNaN(numValue) && inputValue.trim() !== '' ? numValue : inputValue;
+      setCellValue(editingCell.row, editingCell.col, finalValue);
+      setEditingCell(null);
+      setInputValue('');
+    }
+  }, [editingCell, inputValue, setCellValue]);
 
   const handlePasteFromClipboard = useCallback(async () => {
     try {
       if (navigator.clipboard && navigator.clipboard.readText) {
         const clipboardData = await navigator.clipboard.readText();
-        pasteFromText(clipboardData);
+        if (clipboardData.trim()) {
+          pasteFromText(clipboardData);
+        } else if (copiedData) {
+          pasteData();
+        } else {
+          showClipboardNotification('No data to paste');
+        }
       } else if (copiedData) {
         pasteData();
+      } else {
+        showClipboardNotification('No data to paste');
       }
     } catch {
       // Fallback to internal copied data
       if (copiedData) {
         pasteData();
+      } else {
+        showClipboardNotification('Unable to access clipboard');
       }
     }
-  }, [copiedData, pasteFromText, pasteData]);
+  }, [copiedData, pasteFromText, pasteData, showClipboardNotification]);
+
+  // Cell formatting functions
+  const getCurrentCellFormatting = useCallback((): CellFormatting => {
+    if (!selectedCell) return {};
+    
+    const cell = sheetData[selectedCell.row]?.[selectedCell.col];
+    return cell?.formatting || {};
+  }, [selectedCell, sheetData]);
+
+  const formatSelectedCells = useCallback((formatting: Partial<CellFormatting>) => {
+    const selectedCells = getSelectedCells();
+    if (selectedCells.length === 0) return;
+
+    // Get current formatting for all selected cells for undo
+    const previousFormatting = selectedCells.map(({row, col}) => ({
+      row,
+      col,
+      formatting: sheetData[row]?.[col]?.formatting || {}
+    }));
+
+    const command: Command = {
+      execute: () => {
+        setSheetData(prev => {
+          const newData = { ...prev };
+          selectedCells.forEach(({row, col}) => {
+            if (!newData[row]) newData[row] = {};
+            if (!newData[row][col]) newData[row][col] = { value: prev[row]?.[col]?.value ?? '' };
+            
+            newData[row][col] = {
+              ...newData[row][col],
+              formatting: {
+                ...newData[row][col].formatting,
+                ...formatting
+              }
+            };
+          });
+          return newData;
+        });
+      },
+      undo: () => {
+        setSheetData(prev => {
+          const newData = { ...prev };
+          previousFormatting.forEach(({row, col, formatting}) => {
+            if (!newData[row]) newData[row] = {};
+            if (!newData[row][col]) newData[row][col] = { value: prev[row]?.[col]?.value ?? '' };
+            
+            newData[row][col] = {
+              ...newData[row][col],
+              formatting
+            };
+          });
+          return newData;
+        });
+      },
+      description: `Format ${selectedCells.length} cell(s)`
+    };
+
+    executeCommand(command);
+  }, [getSelectedCells, sheetData, executeCommand]);
+
+
 
   // Handle global keyboard events for copy/paste/undo/redo
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
-      // Only handle if the spreadsheet area has focus
+      // Prevent shortcuts when typing in input fields or editing cells
       const target = e.target as HTMLElement;
-      const isSpreadsheetFocused = target.closest('.spreadsheet-container') !== null;
+      const isTypingInInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable;
       
-      if (!isSpreadsheetFocused || editingCell) return;
+      // Don't handle shortcuts when editing a cell or typing in input fields
+      if (editingCell || isTypingInInput) return;
+      
+      // Only handle shortcuts when we have a valid selection in the spreadsheet
+      if (!selectedCell && !selectedRange) return;
 
       if (e.ctrlKey || e.metaKey) {
-        if (e.key === 'c') {
+        if (e.key === 'c' || e.key === 'C') {
           copySelectedCells();
           e.preventDefault();
-        } else if (e.key === 'v') {
+          e.stopPropagation();
+        } else if (e.key === 'v' || e.key === 'V') {
           handlePasteFromClipboard();
           e.preventDefault();
-        } else if (e.key === 'x') {
+          e.stopPropagation();
+        } else if (e.key === 'x' || e.key === 'X') {
           cutSelectedCells();
           e.preventDefault();
-        } else if (e.key === 'a') {
+          e.stopPropagation();
+        } else if (e.key === 'a' || e.key === 'A') {
           selectAllCells();
           e.preventDefault();
-        } else if (e.key === 'z') {
+          e.stopPropagation();
+        } else if (e.key === 'z' || e.key === 'Z') {
           if (e.shiftKey) {
             // Ctrl+Shift+Z or Cmd+Shift+Z = Redo
             if (canRedo) {
@@ -788,16 +1199,19 @@ const MIN_ROW_HEIGHT = 15; // A-Z columns
             }
           }
           e.preventDefault();
-        } else if (e.key === 'y') {
+          e.stopPropagation();
+        } else if (e.key === 'y' || e.key === 'Y') {
           // Ctrl+Y or Cmd+Y = Redo (alternative shortcut)
           if (canRedo) {
             redo();
           }
           e.preventDefault();
+          e.stopPropagation();
         }
-      } else if (e.key === 'Delete') {
+      } else if (e.key === 'Delete' || e.key === 'Backspace') {
         deleteSelectedCells();
         e.preventDefault();
+        e.stopPropagation();
       }
     };
 
@@ -805,7 +1219,7 @@ const MIN_ROW_HEIGHT = 15; // A-Z columns
     return () => {
       document.removeEventListener('keydown', handleGlobalKeyDown);
     };
-  }, [editingCell, copySelectedCells, cutSelectedCells, deleteSelectedCells, handlePasteFromClipboard, selectAllCells, undo, redo, canUndo, canRedo]);
+  }, [editingCell, selectedCell, selectedRange, copySelectedCells, cutSelectedCells, deleteSelectedCells, handlePasteFromClipboard, selectAllCells, undo, redo, canUndo, canRedo]);
 
   // Restore cursor position after input value changes
   useEffect(() => {
@@ -817,10 +1231,18 @@ const MIN_ROW_HEIGHT = 15; // A-Z columns
     }
   }, [inputValue, editingCell]);
 
-  const handleCellClick = (row: number, col: number, event?: React.MouseEvent) => {
+  const handleCellClick = useCallback((row: number, col: number, event?: React.MouseEvent) => {
+    // Don't interfere with double-click events
+    if (event?.detail === 2) {
+      return;
+    }
+    
     if (editingCell) {
       commitEdit();
     }
+    
+    // Auto-expand grid when navigating to cells
+    handleAutoExpansion(row, col);
     
     // Clear copied data when making new selections
     setCopiedData(null);
@@ -838,9 +1260,14 @@ const MIN_ROW_HEIGHT = 15; // A-Z columns
       setSelectedCell({ row, col });
       setSelectedRange(null);
     }
-  };
+  }, [editingCell, commitEdit, handleAutoExpansion, selectedCell]);
 
-  const handleMouseDown = (row: number, col: number, event: React.MouseEvent) => {
+  const handleMouseDown = useCallback((row: number, col: number, event: React.MouseEvent) => {
+    // Don't interfere with double-click events
+    if (event.detail === 2) {
+      return;
+    }
+    
     if (editingCell) {
       commitEdit();
     }
@@ -852,9 +1279,9 @@ const MIN_ROW_HEIGHT = 15; // A-Z columns
       setSelectedRange(null);
       setIsSelecting(true);
     }
-  };
+  }, [editingCell, commitEdit]);
 
-  const handleMouseEnter = (row: number, col: number) => {
+  const handleMouseEnter = useCallback((row: number, col: number) => {
     if (fillHandleActive) {
       handleFillHandleMouseMove(row, col);
     } else if (isSelecting && selectedCell && !editingCell) {
@@ -865,11 +1292,11 @@ const MIN_ROW_HEIGHT = 15; // A-Z columns
         endCol: col
       });
     }
-  };
+  }, [fillHandleActive, handleFillHandleMouseMove, isSelecting, selectedCell, editingCell]);
 
-  const handleMouseUp = () => {
+  const handleMouseUp = useCallback(() => {
     setIsSelecting(false);
-  };
+  }, []);
 
   // Column resize handlers
   const handleColumnResizeStart = (e: React.MouseEvent, colIndex: number) => {
@@ -1033,30 +1460,73 @@ const MIN_ROW_HEIGHT = 15; // A-Z columns
     };
   }, [isResizingColumn, isResizingRow, handleColumnResizeMove, handleColumnResizeEnd, handleRowResizeMove, handleRowResizeEnd]);
 
-  const handleCellDoubleClick = (row: number, col: number, startWithKey?: string) => {
+  const handleCellDoubleClick = useCallback((row: number, col: number, startWithKey?: string) => {
     const currentValue = getCellValue(row, col);
+    
+    // Enter editing mode
     setEditingCell({ row, col });
     setInputValue(startWithKey || String(currentValue));
     setSelectedCell({ row, col });
-    setSelectedRange(null); // Clear range selection when editing
-    setCopiedData(null); // Clear copied data when editing
+    setSelectedRange(null);
+    setCopiedData(null);
     
-    // Focus input on next render
-    setTimeout(() => {
-      inputRef.current?.focus();
-      // Position cursor at the end instead of selecting all text
-      if (startWithKey) {
-        // If starting with a key, position cursor at the end
-        inputRef.current?.setSelectionRange(startWithKey.length, startWithKey.length);
+    // Focus input with retry logic
+    const focusInput = () => {
+      if (inputRef.current) {
+        inputRef.current.focus();
+        inputRef.current.select();
       } else {
-        // If double-clicking to edit existing value, position cursor at the end
-        const valueLength = String(currentValue).length;
-        inputRef.current?.setSelectionRange(valueLength, valueLength);
+        setTimeout(focusInput, 5);
       }
-    }, 0);
-  };
+    };
+    
+    // Multiple focus attempts for reliability
+    setTimeout(focusInput, 0);
+    setTimeout(focusInput, 5);
+    setTimeout(focusInput, 10);
+    setTimeout(focusInput, 20);
+  }, [getCellValue]);
 
-  const handleKeyDown = (e: React.KeyboardEvent, row: number, col: number) => {
+  const handleArrowKey = useCallback((key: string, row: number, col: number, shiftKey: boolean = false) => {
+    let newRow = row;
+    let newCol = col;
+    
+    switch (key) {
+      case 'ArrowUp':
+        newRow = Math.max(0, row - 1);
+        break;
+      case 'ArrowDown':
+        newRow = row + 1;
+        break;
+      case 'ArrowLeft':
+        newCol = Math.max(0, col - 1);
+        break;
+      case 'ArrowRight':
+        newCol = col + 1;
+        break;
+    }
+    
+    // Auto-expand grid when navigating with arrow keys
+    handleAutoExpansion(newRow, newCol);
+    
+    if (shiftKey && selectedCell) {
+      // Extend selection with Shift+Arrow
+      setSelectedRange({
+        startRow: selectedCell.row,
+        startCol: selectedCell.col,
+        endRow: newRow,
+        endCol: newCol
+      });
+    } else {
+      // Clear copied data when navigating to new cells
+      setCopiedData(null);
+      // Move active cell and clear range selection
+      setSelectedCell({ row: newRow, col: newCol });
+      setSelectedRange(null);
+    }
+  }, [handleAutoExpansion, selectedCell]);
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent, row: number, col: number) => {
     // Handle keyboard shortcuts
     if (e.ctrlKey || e.metaKey) {
       if (e.key === 'c') {
@@ -1141,53 +1611,9 @@ const MIN_ROW_HEIGHT = 15; // A-Z columns
       // Start editing if user types a character
       handleCellDoubleClick(row, col, e.key);
     }
-  };
+  }, [editingCell, copySelectedCells, handlePasteFromClipboard, cutSelectedCells, selectAllCells, canRedo, redo, canUndo, undo, deleteSelectedCells, handleCellDoubleClick, commitEdit, handleArrowKey]);
 
-        const handleArrowKey = (key: string, row: number, col: number, shiftKey: boolean = false) => {
-    let newRow = row;
-    let newCol = col;
-    
-    switch (key) {
-      case 'ArrowUp':
-        newRow = Math.max(0, row - 1);
-        break;
-      case 'ArrowDown':
-        newRow = row + 1;
-        break;
-      case 'ArrowLeft':
-        newCol = Math.max(0, col - 1);
-        break;
-      case 'ArrowRight':
-        newCol = col + 1;
-        break;
-    }
-    
-    if (shiftKey && selectedCell) {
-      // Extend selection with Shift+Arrow
-      setSelectedRange({
-        startRow: selectedCell.row,
-        startCol: selectedCell.col,
-        endRow: newRow,
-        endCol: newCol
-      });
-    } else {
-      // Clear copied data when navigating to new cells
-      setCopiedData(null);
-      // Move active cell and clear range selection
-      setSelectedCell({ row: newRow, col: newCol });
-      setSelectedRange(null);
-    }
-  };
 
-  const commitEdit = () => {
-    if (editingCell) {
-      const numValue = Number(inputValue);
-      const finalValue = !isNaN(numValue) && inputValue.trim() !== '' ? numValue : inputValue;
-      setCellValue(editingCell.row, editingCell.col, finalValue);
-      setEditingCell(null);
-      setInputValue('');
-    }
-  };
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     // Save cursor position before state update
@@ -1216,38 +1642,76 @@ const MIN_ROW_HEIGHT = 15; // A-Z columns
     }
   };
 
-        const renderCell = (row: number, col: number) => {
-    const cellValue = getCellValue(row, col);
-    const isSelected = isCellSelected(row, col);
-    const isEditing = editingCell?.row === row && editingCell?.col === col;
-    const isPrimarySelection = selectedCell?.row === row && selectedCell?.col === col;
-    const isCopied = isCellCopied(row, col);
-    const isCut = isCellCut(row, col);
-    const isInFillPreview = isCellInFillPreview(row, col);
-    
+  // Memoized cell component for optimal performance
+  const CellComponent = memo<{
+    row: number;
+    col: number;
+    cellValue: string | number;
+    cellData: CellData | undefined;
+    isSelected: boolean;
+    isEditing: boolean;
+    isPrimarySelection: boolean;
+    isCopied: boolean;
+    isCut: boolean;
+    isInFillPreview: boolean;
+    shouldShowFillHandle: boolean;
+    cellStyle: React.CSSProperties;
+    contentStyle: React.CSSProperties;
+    onCellClick: (row: number, col: number, event?: React.MouseEvent) => void;
+    onCellDoubleClick: (row: number, col: number) => void;
+    onMouseDown: (row: number, col: number, event: React.MouseEvent) => void;
+    onMouseEnter: (row: number, col: number) => void;
+    onMouseUp: () => void;
+    onKeyDown: (e: React.KeyboardEvent, row: number, col: number) => void;
+    onFillHandleMouseDown: (e: React.MouseEvent) => void;
+  }>(({
+    row,
+    col,
+    cellValue,
+    isSelected,
+    isEditing,
+    isPrimarySelection,
+    isCopied,
+    isCut,
+    isInFillPreview,
+    shouldShowFillHandle,
+    cellStyle,
+    contentStyle,
+    onCellClick,
+    onCellDoubleClick,
+    onMouseDown,
+    onMouseEnter,
+    onMouseUp,
+    onKeyDown,
+    onFillHandleMouseDown
+  }) => {
     let cellClasses = 'cell';
     if (isSelected) cellClasses += ' selected';
     if (isPrimarySelection) cellClasses += ' primary-selected';
     if (isCut) cellClasses += ' cut';
     else if (isCopied) cellClasses += ' copied';
     if (isInFillPreview) cellClasses += ' fill-preview';
-
-    // Determine if this cell should show the fill handle
-    const shouldShowFillHandle = !isEditing && (isPrimarySelection || 
-      (selectedRange && 
-       row === Math.max(selectedRange.startRow, selectedRange.endRow) && 
-       col === Math.max(selectedRange.startCol, selectedRange.endCol)));
+    if (isEditing) cellClasses += ' editing';
 
     return (
       <td
-        key={`${row}-${col}`}
         className={cellClasses}
-        onClick={(e) => handleCellClick(row, col, e)}
-        onDoubleClick={() => handleCellDoubleClick(row, col)}
-        onMouseDown={(e) => handleMouseDown(row, col, e)}
-        onMouseEnter={() => handleMouseEnter(row, col)}
-        onMouseUp={handleMouseUp}
-        onKeyDown={(e) => handleKeyDown(e, row, col)}
+        style={cellStyle}
+        onClick={(e) => {
+          // Only handle single clicks, not double clicks
+          if (e.detail === 1) {
+            onCellClick(row, col, e);
+          }
+        }}
+        onDoubleClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          onCellDoubleClick(row, col);
+        }}
+        onMouseDown={(e) => onMouseDown(row, col, e)}
+        onMouseEnter={() => onMouseEnter(row, col)}
+        onMouseUp={onMouseUp}
+        onKeyDown={(e) => onKeyDown(e, row, col)}
         tabIndex={0}
       >
         {isEditing ? (
@@ -1259,46 +1723,140 @@ const MIN_ROW_HEIGHT = 15; // A-Z columns
             onKeyDown={handleInputKeyDown}
             onBlur={commitEdit}
             className="cell-input"
+            style={contentStyle}
+            autoFocus
+            onFocus={(e) => {
+              e.target.select();
+            }}
           />
         ) : (
-          <div className="cell-content">
+          <div 
+            className="cell-content" 
+            style={{
+              ...contentStyle,
+              userSelect: 'none',
+              pointerEvents: 'auto'
+            }}
+            onDoubleClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onCellDoubleClick(row, col);
+            }}
+          >
             {String(cellValue)}
             {shouldShowFillHandle && (
               <div 
                 className="fill-handle"
-                onMouseDown={handleFillHandleMouseDown}
+                onMouseDown={onFillHandleMouseDown}
               />
             )}
           </div>
         )}
       </td>
     );
-  };
+  });
+  
+  // Optimized helper functions for cell rendering (memoized)
+  const getJustifyContent = useMemo(() => (align?: string) => {
+    switch (align) {
+      case 'left': return 'flex-start';
+      case 'center': return 'center';
+      case 'right': return 'flex-end';
+      case 'justify': return 'space-between';
+      default: return 'flex-start';
+    }
+  }, []);
+
+  const getAlignItems = useMemo(() => (align?: string) => {
+    switch (align) {
+      case 'top': return 'flex-start';
+      case 'middle': return 'center';
+      case 'bottom': return 'flex-end';
+      default: return 'center';
+    }
+  }, []);
+
+  const renderCell = useCallback((row: number, col: number) => {
+    const cellValue = getCellValue(row, col);
+    const cellData = sheetData[row]?.[col];
+    const formatting = cellData?.formatting || {};
+    const isSelected = isCellSelected(row, col);
+    const isEditing = editingCell?.row === row && editingCell?.col === col;
+    const isPrimarySelection = selectedCell?.row === row && selectedCell?.col === col;
+    const isCopied = isCellCopied(row, col);
+    const isCut = isCellCut(row, col);
+    const isInFillPreview = isCellInFillPreview(row, col);
+
+
+
+    // Determine if this cell should show the fill handle
+            const shouldShowFillHandle = !isEditing && (isPrimarySelection || 
+      (selectedRange ? 
+       row === Math.max(selectedRange.startRow, selectedRange.endRow) && 
+       col === Math.max(selectedRange.startCol, selectedRange.endCol) : false));
+
+    // Create cell style from formatting
+    const cellStyle: React.CSSProperties = {
+      backgroundColor: formatting.backgroundColor,
+      textAlign: formatting.textAlign,
+      verticalAlign: formatting.verticalAlign,
+    };
+
+    // Create content style from formatting with flexbox alignment
+    const contentStyle: React.CSSProperties = {
+      fontFamily: formatting.fontFamily,
+      fontSize: formatting.fontSize ? `${formatting.fontSize}px` : undefined,
+      fontWeight: formatting.bold ? 'bold' : 'normal',
+      fontStyle: formatting.italic ? 'italic' : 'normal',
+      textDecoration: formatting.underline ? 'underline' : 'none',
+      color: formatting.color,
+      justifyContent: getJustifyContent(formatting.textAlign),
+      alignItems: getAlignItems(formatting.verticalAlign),
+    };
+
+    return (
+      <CellComponent
+        key={`${row}-${col}`}
+        row={row}
+        col={col}
+        cellValue={cellValue}
+        cellData={cellData}
+        isSelected={isSelected}
+        isEditing={isEditing}
+        isPrimarySelection={isPrimarySelection}
+        isCopied={isCopied}
+        isCut={isCut}
+        isInFillPreview={isInFillPreview}
+        shouldShowFillHandle={shouldShowFillHandle}
+        cellStyle={cellStyle}
+        contentStyle={contentStyle}
+        onCellClick={handleCellClick}
+        onCellDoubleClick={handleCellDoubleClick}
+        onMouseDown={handleMouseDown}
+        onMouseEnter={handleMouseEnter}
+        onMouseUp={handleMouseUp}
+        onKeyDown={handleKeyDown}
+        onFillHandleMouseDown={handleFillHandleMouseDown}
+      />
+    );
+  }, [getCellValue, sheetData, isCellSelected, editingCell, selectedCell, isCellCopied, isCellCut, isCellInFillPreview, selectedRange, handleCellClick, handleCellDoubleClick, handleMouseDown, handleMouseEnter, handleMouseUp, handleKeyDown, handleFillHandleMouseDown, getJustifyContent, getAlignItems, CellComponent]);
 
   return (
-    <div className="spreadsheet-container" tabIndex={0}>
-      {/* Undo/Redo Toolbar */}
-      <div className="undo-redo-toolbar">
-        <button 
-          className={`undo-button ${canUndo ? 'enabled' : 'disabled'}`}
-          onClick={undo}
-          disabled={!canUndo}
-          title="Undo (Ctrl+Z)"
-        >
-          ↶ Undo
-        </button>
-        <button 
-          className={`redo-button ${canRedo ? 'enabled' : 'disabled'}`}
-          onClick={redo}
-          disabled={!canRedo}
-          title="Redo (Ctrl+Y or Ctrl+Shift+Z)"
-        >
-          ↷ Redo
-        </button>
-        <div className="keyboard-shortcuts-help">
-          <small>Ctrl+Z: Undo | Ctrl+Y: Redo | Ctrl+C: Copy | Ctrl+V: Paste | Ctrl+X: Cut | Delete: Clear</small>
-        </div>
-      </div>
+    <div className="spreadsheet-container" tabIndex={0} onFocus={() => {}} onClick={() => {}}>
+      {/* Excel Toolbar */}
+      <ExcelToolbar
+        onFormat={formatSelectedCells}
+        onUndo={undo}
+        onRedo={redo}
+        onCopy={() => copySelectedCells(false)}
+        onCut={() => copySelectedCells(true)}
+        onPaste={handlePasteFromClipboard}
+        currentFormatting={getCurrentCellFormatting()}
+        canUndo={canUndo}
+        canRedo={canRedo}
+        canPaste={!!copiedData || true}
+      />
+
       <style>{`
         .spreadsheet-container {
           width: 100%;
@@ -1311,55 +1869,32 @@ const MIN_ROW_HEIGHT = 15; // A-Z columns
           user-select: none;
           display: flex;
           flex-direction: column;
+          outline: none;
         }
         
-        .undo-redo-toolbar {
-          padding: 8px 12px;
-          background: #f8f9fa;
-          border-bottom: 1px solid #e9ecef;
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          flex-shrink: 0;
+        .spreadsheet-container:focus {
+          outline: none;
         }
-        
-        .undo-button, .redo-button {
-          padding: 4px 12px;
-          border: 1px solid #d4d4d4;
-          background: white;
-          color: #333;
-          border-radius: 3px;
-          font-size: 11px;
-          cursor: pointer;
-          transition: all 0.2s ease;
-        }
-        
-        .undo-button.enabled:hover, .redo-button.enabled:hover {
-          background: #f0f0f0;
-          border-color: #217346;
-        }
-        
-        .undo-button.disabled, .redo-button.disabled {
-          background: #f5f5f5;
-          color: #999;
-          cursor: not-allowed;
-        }
-        
-        .keyboard-shortcuts-help {
-          margin-left: auto;
-          color: #666;
-        }
+
 
         
         .spreadsheet-table-container {
           flex: 1;
           overflow: auto;
+          transform: scale(${zoomLevel / 100}) translateZ(0);
+          transform-origin: top left;
+          will-change: transform, scroll-position;
+          contain: layout style paint;
+          backface-visibility: hidden;
+          -webkit-backface-visibility: hidden;
         }
         
         .spreadsheet-table {
           border-collapse: collapse;
           width: max-content;
           min-width: 100%;
+          transform: translateZ(0);
+          will-change: contents;
         }
         
         .header-row th,
@@ -1396,6 +1931,19 @@ const MIN_ROW_HEIGHT = 15; // A-Z columns
           z-index: 102;
         }
         
+        /* Highlighted header styles */
+        .header-row th.highlighted {
+          background: linear-gradient(180deg, #217346 0%, #1a5b36 100%) !important;
+          color: white !important;
+          font-weight: 500;
+        }
+        
+        .row-header.highlighted {
+          background: linear-gradient(180deg, #217346 0%, #1a5b36 100%) !important;
+          color: white !important;
+          font-weight: 500;
+        }
+        
         .cell {
           border: 1px solid #d4d4d4;
           padding: 0;
@@ -1406,6 +1954,15 @@ const MIN_ROW_HEIGHT = 15; // A-Z columns
           position: relative;
           cursor: cell;
           outline: none;
+          transform: translateZ(0);
+          will-change: background-color, border-color;
+          contain: layout style;
+          user-select: none;
+          pointer-events: auto;
+        }
+        
+        .cell.editing {
+          cursor: text;
         }
         
         .cell:first-child {
@@ -1415,61 +1972,143 @@ const MIN_ROW_HEIGHT = 15; // A-Z columns
         }
         
         .cell.selected {
-          background: rgba(33, 115, 70, 0.1) !important;
+          box-shadow: inset 0 0 0 1px rgba(33, 115, 70, 0.6) !important;
+          position: relative;
           z-index: 40;
         }
         
+        .cell.selected::after {
+          content: '';
+          position: absolute;
+          top: 0;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          background: rgba(33, 115, 70, 0.08);
+          pointer-events: none;
+          z-index: 1;
+        }
+        
         .cell.primary-selected {
-          border: 2px solid #217346 !important;
+          border: 3px solid #217346 !important;
           z-index: 50;
-          background: white !important;
+          box-shadow: 0 0 0 1px rgba(33, 115, 70, 0.3) !important;
+        }
+        
+        .cell.primary-selected::after {
+          content: '';
+          position: absolute;
+          top: 0;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          background: rgba(33, 115, 70, 0.12);
+          pointer-events: none;
+          z-index: 1;
         }
         
         .cell.copied {
           border: 2px dashed #0078d4 !important;
-          animation: copied-pulse 2s ease-in-out infinite;
           z-index: 30;
+          position: relative;
+          animation: copied-border-pulse 2s ease-in-out infinite;
+        }
+        
+        .cell.copied::after {
+          content: '';
+          position: absolute;
+          top: 0;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          background: rgba(0, 120, 212, 0.15);
+          pointer-events: none;
+          z-index: 1;
+          animation: copied-pulse-overlay 2s ease-in-out infinite;
         }
         
         .cell.cut {
           border: 2px dotted #d73502 !important;
-          animation: cut-pulse 1.5s ease-in-out infinite;
           z-index: 30;
-          background: rgba(215, 53, 2, 0.05) !important;
+          position: relative;
+          animation: cut-border-pulse 1.5s ease-in-out infinite;
         }
         
-        @keyframes copied-pulse {
+        .cell.cut::after {
+          content: '';
+          position: absolute;
+          top: 0;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          background: rgba(215, 53, 2, 0.05);
+          pointer-events: none;
+          z-index: 1;
+          animation: cut-pulse-overlay 1.5s ease-in-out infinite;
+        }
+        
+        @keyframes copied-pulse-overlay {
           0% { 
             background: rgba(0, 120, 212, 0.15);
-            border-color: #0078d4;
           }
           50% { 
             background: rgba(0, 120, 212, 0.05);
-            border-color: #4a9eff;
           }
           100% { 
             background: rgba(0, 120, 212, 0.15);
+          }
+        }
+        
+        @keyframes cut-pulse-overlay {
+          0% { 
+            background: rgba(215, 53, 2, 0.1);
+          }
+          50% { 
+            background: rgba(215, 53, 2, 0.03);
+          }
+          100% { 
+            background: rgba(215, 53, 2, 0.1);
+          }
+        }
+        
+        @keyframes copied-border-pulse {
+          0% { 
+            border-color: #0078d4;
+          }
+          50% { 
+            border-color: #4a9eff;
+          }
+          100% { 
             border-color: #0078d4;
           }
         }
         
-        @keyframes cut-pulse {
+        @keyframes cut-border-pulse {
           0% { 
-            background: rgba(215, 53, 2, 0.1);
             border-color: #d73502;
           }
           50% { 
-            background: rgba(215, 53, 2, 0.03);
             border-color: #ff6b3d;
           }
           100% { 
-            background: rgba(215, 53, 2, 0.1);
             border-color: #d73502;
           }
         }
         
         .cell:hover:not(.selected):not(.primary-selected):not(.copied):not(.cut) {
-          background: #f5f5f5;
+          position: relative;
+        }
+        
+        .cell:hover:not(.selected):not(.primary-selected):not(.copied):not(.cut)::before {
+          content: '';
+          position: absolute;
+          top: 0;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          background: rgba(0, 0, 0, 0.04);
+          pointer-events: none;
+          z-index: 1;
         }
         
         /* Ensure proper cleanup when copied/cut class is removed */
@@ -1482,7 +2121,6 @@ const MIN_ROW_HEIGHT = 15; // A-Z columns
           height: 100%;
           padding: 2px 4px;
           display: flex;
-          align-items: center;
           box-sizing: border-box;
           background: transparent;
           border: none;
@@ -1491,31 +2129,52 @@ const MIN_ROW_HEIGHT = 15; // A-Z columns
           text-overflow: ellipsis;
           white-space: nowrap;
           color: black;
+          position: relative;
+          z-index: 2;
+          transform: translateZ(0);
+          contain: layout style paint;
+          cursor: inherit;
+          user-select: none;
+          pointer-events: auto;
+        }
+        
+        .cell-content:hover {
+          background: rgba(0, 0, 0, 0.02);
+        }
+        
+        .cell.editing .cell-content {
+          cursor: text;
         }
         
         .cell-input {
           width: 100%;
           height: 100%;
           padding: 2px 4px;
-          border: none;
+          border: 2px solid #217346;
           outline: none;
           background: white;
           font-family: inherit;
           font-size: inherit;
           box-sizing: border-box;
+          position: relative;
           z-index: 200;
           color: black;
           user-select: text;
+          border-radius: 0;
+          cursor: text;
         }
         
         .cell-input:focus {
           border: 2px solid #217346;
+          box-shadow: 0 0 0 1px rgba(33, 115, 70, 0.3);
+          cursor: text;
         }
         
         .cell.fill-preview {
           background: rgba(33, 115, 70, 0.2) !important;
           border: 1px dashed #217346 !important;
         }
+
         
         .fill-handle {
           position: absolute;
@@ -1528,11 +2187,14 @@ const MIN_ROW_HEIGHT = 15; // A-Z columns
           cursor: crosshair;
           z-index: 100;
           box-sizing: border-box;
+          transform: translateZ(0);
+          will-change: transform, background-color;
+          transition: transform 0.1s ease-out;
         }
         
         .fill-handle:hover {
           background: #1a5a37;
-          transform: scale(1.2);
+          transform: scale(1.2) translateZ(0);
         }
         
         .cell-content {
@@ -1622,60 +2284,279 @@ const MIN_ROW_HEIGHT = 15; // A-Z columns
           -moz-user-select: none;
           -ms-user-select: none;
         }
+        
+        /* Zoom Control Bar */
+        .zoom-control-bar {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 4px 8px;
+          background: #f8f9fa;
+          border-top: 1px solid #d4d4d4;
+          font-size: 11px;
+          height: 24px;
+          flex-shrink: 0;
+        }
+        
+        .zoom-btn {
+          width: 20px;
+          height: 16px;
+          border: 1px solid #ccc;
+          background: white;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 12px;
+          font-weight: bold;
+          color: #333;
+        }
+        
+        .zoom-btn:hover:not(:disabled) {
+          background: #e9ecef;
+          border-color: #217346;
+        }
+        
+        .zoom-btn:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
+        }
+        
+        .zoom-display {
+          margin: 0 8px;
+          padding: 2px 6px;
+          cursor: pointer;
+          border: 1px solid transparent;
+          border-radius: 2px;
+          min-width: 40px;
+          text-align: center;
+        }
+        
+        .zoom-display:hover {
+          background: #e9ecef;
+          border-color: #ccc;
+        }
+        
+        .grid-info {
+          color: #666;
+          font-size: 10px;
+          margin-left: auto;
+        }
+        
+        /* Clipboard notification styles */
+        .clipboard-notification {
+          position: fixed;
+          top: 80px;
+          right: 20px;
+          background: #28a745;
+          color: white;
+          padding: 8px 16px;
+          border-radius: 4px;
+          font-size: 12px;
+          font-weight: 500;
+          box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+          z-index: 1000;
+          animation: slideInFade 0.3s ease-out;
+          max-width: 300px;
+        }
+        
+        .clipboard-notification.error {
+          background: #dc3545;
+        }
+        
+        .clipboard-notification.info {
+          background: #17a2b8;
+        }
+        
+        @keyframes slideInFade {
+          from {
+            opacity: 0;
+            transform: translateX(100%);
+          }
+          to {
+            opacity: 1;
+            transform: translateX(0);
+          }
+        }
+        
+        /* Enhanced copy/cut cell animations */
+        .cell.copied {
+          border: 2px dashed #0078d4 !important;
+          z-index: 30;
+          position: relative;
+          animation: copied-border-pulse 2s ease-in-out infinite;
+          box-shadow: 0 0 0 1px rgba(0, 120, 212, 0.3) !important;
+        }
+        
+        .cell.copied::after {
+          content: '';
+          position: absolute;
+          top: 0;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          background: rgba(0, 120, 212, 0.15);
+          pointer-events: none;
+          z-index: 1;
+          animation: copied-pulse-overlay 2s ease-in-out infinite;
+        }
+        
+        .cell.cut {
+          border: 2px dotted #d73502 !important;
+          z-index: 30;
+          position: relative;
+          animation: cut-border-pulse 1.5s ease-in-out infinite;
+          box-shadow: 0 0 0 1px rgba(215, 53, 2, 0.3) !important;
+        }
+        
+        .cell.cut::after {
+          content: '';
+          position: absolute;
+          top: 0;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          background: rgba(215, 53, 2, 0.1);
+          pointer-events: none;
+          z-index: 1;
+          animation: cut-pulse-overlay 1.5s ease-in-out infinite;
+        }
       `}</style>
       
-      <div className="spreadsheet-table-container">
+      <div className="spreadsheet-table-container" ref={scrollContainerRef}>
         <table className="spreadsheet-table">
+          {/* Virtual scrolling container - maintains total grid size */}
+          <colgroup>
+            <col style={{ width: '42px' }} />
+            {(() => {
+              const viewport = calculateViewport;
+              const cols = [];
+              
+              // Add spacer columns before visible area
+              if (viewport.startCol > 0) {
+                const spacerWidth = viewport.startCol * DEFAULT_COLUMN_WIDTH;
+                cols.push(<col key="spacer-left" style={{ width: `${spacerWidth}px` }} />);
+              }
+              
+              // Add visible columns
+              for (let i = viewport.startCol; i < viewport.endCol; i++) {
+                cols.push(<col key={i} style={{ width: `${getCurrentColumnWidth(i)}px` }} />);
+              }
+              
+              // Add spacer columns after visible area
+              const remainingCols = visibleCols - viewport.endCol;
+              if (remainingCols > 0) {
+                const spacerWidth = remainingCols * DEFAULT_COLUMN_WIDTH;
+                cols.push(<col key="spacer-right" style={{ width: `${spacerWidth}px` }} />);
+              }
+              
+              return cols;
+            })()}
+          </colgroup>
+          
           {/* Header row */}
           <thead>
             <tr className="header-row">
               <th className="row-col-header"></th>
-              {Array.from({ length: INITIAL_COLS }, (_, i) => (
-                <th 
-                  key={i} 
-                  className="column-header"
-                  style={{ 
-                    width: getCurrentColumnWidth(i),
-                    minWidth: MIN_COLUMN_WIDTH,
-                    position: 'relative'
-                  }}
-                >
-                  {generateColumnLabel(i)}
-                  <div 
-                    className="column-resize-handle"
-                    onMouseDown={(e) => handleColumnResizeStart(e, i)}
-                  />
-                </th>
-              ))}
+              {(() => {
+                const viewport = calculateViewport;
+                const headers = [];
+                const highlightedColumns = getHighlightedColumns;
+                
+                // Add spacer header for left offset
+                if (viewport.startCol > 0) {
+                  headers.push(
+                    <th key="spacer-left" style={{ width: `${viewport.startCol * DEFAULT_COLUMN_WIDTH}px`, border: 'none', background: 'transparent' }}></th>
+                  );
+                }
+                
+                // Add visible column headers
+                for (let i = viewport.startCol; i < viewport.endCol; i++) {
+                  const isHighlighted = highlightedColumns.has(i);
+                  headers.push(
+                    <th 
+                      key={i} 
+                      className={`column-header ${isHighlighted ? 'highlighted' : ''}`}
+                      style={{ 
+                        width: getCurrentColumnWidth(i),
+                        minWidth: MIN_COLUMN_WIDTH,
+                        position: 'relative'
+                      }}
+                    >
+                      {generateColumnLabel(i)}
+                      <div 
+                        className="column-resize-handle"
+                        onMouseDown={(e) => handleColumnResizeStart(e, i)}
+                      />
+                    </th>
+                  );
+                }
+                
+                // Add spacer header for right offset
+                const remainingCols = visibleCols - viewport.endCol;
+                if (remainingCols > 0) {
+                  headers.push(
+                    <th key="spacer-right" style={{ width: `${remainingCols * DEFAULT_COLUMN_WIDTH}px`, border: 'none', background: 'transparent' }}></th>
+                  );
+                }
+                
+                return headers;
+              })()}
             </tr>
           </thead>
           
-          {/* Data rows */}
+          {/* Data rows with virtual scrolling */}
           <tbody>
-            {Array.from({ length: INITIAL_ROWS }, (_, row) => (
-              <tr 
-                key={row}
-                style={{
-                  height: getCurrentRowHeight(row),
-                  minHeight: MIN_ROW_HEIGHT
-                }}
-              >
-                <td 
-                  className="row-header"
-                  style={{ 
-                    position: 'relative',
-                    height: getCurrentRowHeight(row)
-                  }}
-                >
-                  {row + 1}
-                  <div 
-                    className="row-resize-handle"
-                    onMouseDown={(e) => handleRowResizeStart(e, row)}
-                  />
-                </td>
-                {Array.from({ length: INITIAL_COLS }, (_, col) => {
+            {(() => {
+              const viewport = calculateViewport;
+              const rows = [];
+              const highlightedRows = getHighlightedRows;
+              
+              // Add spacer row for top offset (invisible rows above viewport)
+              if (viewport.startRow > 0) {
+                const spacerHeight = viewport.startRow * DEFAULT_ROW_HEIGHT;
+                rows.push(
+                  <tr key="spacer-top" style={{ height: `${spacerHeight}px` }}>
+                    <td colSpan={visibleCols + 1} style={{ border: 'none', padding: 0 }}></td>
+                  </tr>
+                );
+              }
+              
+              // Render visible rows
+              for (let row = viewport.startRow; row < viewport.endRow; row++) {
+                const isRowHighlighted = highlightedRows.has(row);
+                const rowCells = [];
+                
+                // Row header
+                rowCells.push(
+                  <td 
+                    key="row-header"
+                    className={`row-header ${isRowHighlighted ? 'highlighted' : ''}`}
+                    style={{ 
+                      position: 'relative',
+                      height: getCurrentRowHeight(row)
+                    }}
+                  >
+                    {row + 1}
+                    <div 
+                      className="row-resize-handle"
+                      onMouseDown={(e) => handleRowResizeStart(e, row)}
+                    />
+                  </td>
+                );
+                
+                // Add spacer cell for left offset (invisible columns)
+                if (viewport.startCol > 0) {
+                  rowCells.push(
+                    <td key="cell-spacer-left" style={{ width: `${viewport.startCol * DEFAULT_COLUMN_WIDTH}px`, border: 'none', padding: 0 }}></td>
+                  );
+                }
+                
+                // Render visible cells in this row
+                for (let col = viewport.startCol; col < viewport.endCol; col++) {
                   const cell = renderCell(row, col);
-                  return React.cloneElement(cell, {
+                  rowCells.push(React.cloneElement(cell, {
+                    key: `cell-${col}`,
                     style: {
                       ...cell.props.style,
                       width: getCurrentColumnWidth(col),
@@ -1683,15 +2564,59 @@ const MIN_ROW_HEIGHT = 15; // A-Z columns
                       height: getCurrentRowHeight(row),
                       minHeight: MIN_ROW_HEIGHT
                     }
-                  });
-                })}
-              </tr>
-            ))}
+                  }));
+                }
+                
+                // Add spacer cell for right offset (invisible columns)
+                const remainingCols = visibleCols - viewport.endCol;
+                if (remainingCols > 0) {
+                  rowCells.push(
+                    <td key="cell-spacer-right" style={{ width: `${remainingCols * DEFAULT_COLUMN_WIDTH}px`, border: 'none', padding: 0 }}></td>
+                  );
+                }
+                
+                rows.push(
+                  <tr 
+                    key={row}
+                    style={{
+                      height: getCurrentRowHeight(row),
+                      minHeight: MIN_ROW_HEIGHT
+                    }}
+                  >
+                    {rowCells}
+                  </tr>
+                );
+              }
+              
+              // Add spacer row for bottom offset (invisible rows below viewport)
+              const remainingRows = visibleRows - viewport.endRow;
+              if (remainingRows > 0) {
+                const spacerHeight = remainingRows * DEFAULT_ROW_HEIGHT;
+                rows.push(
+                  <tr key="spacer-bottom" style={{ height: `${spacerHeight}px` }}>
+                    <td colSpan={visibleCols + 1} style={{ border: 'none', padding: 0 }}></td>
+                  </tr>
+                );
+              }
+              
+              return rows;
+            })()}
           </tbody>
         </table>
       </div>
+      
+      {/* Clipboard Notification */}
+      {clipboardNotification && (
+        <div className={`clipboard-notification ${clipboardNotification.includes('error') || clipboardNotification.includes('No') ? 'error' : clipboardNotification.includes('Unable') || clipboardNotification.includes('unavailable') ? 'info' : ''}`}>
+          {clipboardNotification}
+        </div>
+      )}
     </div>
   );
-};
+});
+
+// Set display name for better debugging
+ExcelSpreadsheet.displayName = 'ExcelSpreadsheet';
 
 export default ExcelSpreadsheet;
+export type { CellFormatting };
