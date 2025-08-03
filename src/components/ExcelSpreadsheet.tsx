@@ -1849,7 +1849,7 @@ const ExcelSpreadsheet: React.FC = memo(() => {
         onUndo={undo}
         onRedo={redo}
         onCopy={() => copySelectedCells(false)}
-        onCut={() => copySelectedCells(true)}
+        // onCut={() => copySelectedCells(true)}
         onPaste={handlePasteFromClipboard}
         currentFormatting={getCurrentCellFormatting()}
         canUndo={canUndo}

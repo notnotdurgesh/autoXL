@@ -13,7 +13,6 @@ interface ExcelToolbarProps {
   onUndo: () => void;
   onRedo: () => void;
   onCopy?: () => void;
-  onCut?: () => void;
   onPaste?: () => void;
   currentFormatting: CellFormatting;
   canUndo: boolean;
@@ -41,7 +40,6 @@ const ExcelToolbar: React.FC<ExcelToolbarProps> = memo(({
   onUndo,
   onRedo,
   onCopy,
-  onCut,
   onPaste,
   currentFormatting,
   canUndo,
