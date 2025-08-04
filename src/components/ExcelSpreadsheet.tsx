@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
 import { useUndoRedo, type Command } from '../hooks/useUndoRedo';
 import ExcelToolbar from './ExcelToolbar';
+import FormulaInputBar from './FormulaInputBar';
 import { createOptimizedHandler, runWhenIdle } from '../utills/performanceUtil';
 
 interface CellFormatting {
@@ -55,6 +56,8 @@ const ExcelSpreadsheet: React.FC = memo(() => {
   const [selectedRange, setSelectedRange] = useState<CellRange | null>(null);
   const [editingCell, setEditingCell] = useState<{row: number, col: number} | null>(null);
   const [inputValue, setInputValue] = useState<string>('');
+  const [isEditingInInputBar, setIsEditingInInputBar] = useState<boolean>(false);
+  const [isFreshEdit, setIsFreshEdit] = useState<boolean>(false);
   const [isSelecting, setIsSelecting] = useState<boolean>(false);
   const [copiedData, setCopiedData] = useState<{data: CellData[][], range: CellRange, isCut?: boolean} | null>(null);
   
@@ -84,7 +87,6 @@ const ExcelSpreadsheet: React.FC = memo(() => {
   // Scroll position tracking
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const cursorPositionRef = useRef<number>(0);
   
   // Column and row resizing state
   const [columnWidths, setColumnWidths] = useState<{[key: number]: number}>({});
@@ -137,6 +139,11 @@ const ExcelSpreadsheet: React.FC = memo(() => {
       return result;
     };
   }, []);
+
+  // Get cell address (e.g., "A1", "B3")
+  const getCellAddress = useCallback((row: number, col: number): string => {
+    return `${generateColumnLabel(col)}${row + 1}`;
+  }, [generateColumnLabel]);
 
   // Grid expansion functions - Excel-like behavior
 
@@ -1131,15 +1138,38 @@ const ExcelSpreadsheet: React.FC = memo(() => {
     selectAllCells();
   }, [selectAllCells]);
 
+  const commitInputBarEdit = useCallback(() => {
+    if (selectedCell && isEditingInInputBar) {
+      const numValue = Number(inputValue);
+      const finalValue = !isNaN(numValue) && inputValue.trim() !== '' ? numValue : inputValue;
+      setCellValue(selectedCell.row, selectedCell.col, finalValue);
+      
+      // CRITICAL FIX: Immediately clear all editing state
+      setIsEditingInInputBar(false);
+      setEditingCell(null);
+      // Don't clear inputValue here as it will be set by the cell selection
+    }
+  }, [selectedCell, isEditingInInputBar, inputValue, setCellValue]);
+
   const commitEdit = useCallback(() => {
     if (editingCell) {
       const numValue = Number(inputValue);
       const finalValue = !isNaN(numValue) && inputValue.trim() !== '' ? numValue : inputValue;
       setCellValue(editingCell.row, editingCell.col, finalValue);
+      
+      // CRITICAL FIX: Immediately clear all editing state
       setEditingCell(null);
+      setIsEditingInInputBar(false);
+      setIsFreshEdit(false); // Clear fresh edit flag
       setInputValue('');
+    } else if (isEditingInInputBar) {
+      commitInputBarEdit();
+      // Ensure input bar editing state is cleared
+      setIsEditingInInputBar(false);
+      setEditingCell(null);
+      setIsFreshEdit(false); // Clear fresh edit flag
     }
-  }, [editingCell, inputValue, setCellValue]);
+  }, [editingCell, inputValue, setCellValue, isEditingInInputBar, commitInputBarEdit]);
 
   const handlePasteFromClipboard = useCallback(async () => {
     try {
@@ -1407,15 +1437,87 @@ const ExcelSpreadsheet: React.FC = memo(() => {
     };
   }, [editingCell, selectedCell, selectedRange, copySelectedCells, cutSelectedCells, deleteSelectedCells, handlePasteFromClipboard, selectAllCells, undo, redo, canUndo, canRedo]);
 
-  // Restore cursor position after input value changes
-  useEffect(() => {
-    if (editingCell && inputRef.current) {
-      // Use Promise.resolve to ensure cursor is set after React finishes rendering
-      Promise.resolve().then(() => {
-        inputRef.current?.setSelectionRange(cursorPositionRef.current, cursorPositionRef.current);
-      });
+  // Don't interfere with natural cursor positioning
+  // Let the browser handle cursor position naturally for better UX
+
+  // Enhanced input handling for bidirectional sync
+  const handleInputBarChange = useCallback((value: string) => {
+    setInputValue(value);
+    // Update cell value in real-time if we're editing (but don't trigger save yet)
+    if (selectedCell && isEditingInInputBar) {
+      setCellValueDirect(selectedCell.row, selectedCell.col, value);
     }
-  }, [inputValue, editingCell]);
+  }, [selectedCell, isEditingInInputBar, setCellValueDirect]);
+
+  const handleInputBarKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    e.stopPropagation(); // Prevent spreadsheet key handlers from interfering
+    
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      commitInputBarEdit();
+      // Move to next row
+      if (selectedCell) {
+        setSelectedCell({ row: selectedCell.row + 1, col: selectedCell.col });
+      }
+    } else if (e.key === 'Tab') {
+      e.preventDefault();
+      commitInputBarEdit();
+      // Move to next column
+      if (selectedCell) {
+        setSelectedCell({ 
+          row: selectedCell.row, 
+          col: e.shiftKey ? Math.max(0, selectedCell.col - 1) : selectedCell.col + 1 
+        });
+      }
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      // Cancel editing - restore original value
+      if (selectedCell) {
+        const originalValue = getCellValue(selectedCell.row, selectedCell.col);
+        setInputValue(String(originalValue || ''));
+      }
+      setIsEditingInInputBar(false);
+      setEditingCell(null);
+    } else if (e.key === 'F2') {
+      e.preventDefault();
+      // Switch to in-cell editing
+      if (selectedCell) {
+        setIsEditingInInputBar(false);
+        setEditingCell(selectedCell);
+      }
+    }
+  }, [selectedCell, getCellValue, commitInputBarEdit]);
+
+  const handleInputBarFocus = useCallback(() => {
+    if (selectedCell) {
+      // Clear cell editing mode and start input bar editing
+      setEditingCell(null);
+      setIsEditingInInputBar(true);
+      
+      // Load current cell value only if not already editing in input bar
+      if (!isEditingInInputBar) {
+        const currentValue = getCellValue(selectedCell.row, selectedCell.col);
+        setInputValue(String(currentValue || ''));
+      }
+    }
+  }, [selectedCell, getCellValue, isEditingInInputBar]);
+
+  const handleInputBarBlur = useCallback(() => {
+    // Don't commit on blur if user is switching to cell editing
+    setTimeout(() => {
+      if (!editingCell) {
+        commitInputBarEdit();
+      }
+    }, 50);
+  }, [editingCell, commitInputBarEdit]);
+
+  // Update input value when selected cell changes (only if not actively editing)
+  useEffect(() => {
+    if (selectedCell && !isEditingInInputBar && !editingCell) {
+      const currentValue = getCellValue(selectedCell.row, selectedCell.col);
+      setInputValue(String(currentValue || ''));
+    }
+  }, [selectedCell, isEditingInInputBar, editingCell, getCellValue]);
 
   const handleCellClick = useCallback((row: number, col: number, event?: React.MouseEvent) => {
     // Don't interfere with double-click events
@@ -1423,8 +1525,12 @@ const ExcelSpreadsheet: React.FC = memo(() => {
       return;
     }
     
-    if (editingCell) {
+    // CRITICAL FIX: Immediately clear editing state when switching cells
+    if (editingCell || isEditingInInputBar) {
       commitEdit();
+      // Force immediate state cleanup to prevent value carryover
+      setEditingCell(null);
+      setIsEditingInInputBar(false);
     }
     
     // Auto-expand grid when navigating to cells
@@ -1442,11 +1548,17 @@ const ExcelSpreadsheet: React.FC = memo(() => {
         endCol: col
       });
     } else {
-      // Single cell selection
+      // Single cell selection - load new cell value immediately
       setSelectedCell({ row, col });
       setSelectedRange(null);
+      
+      // CRITICAL FIX: Immediately load new cell value to prevent carryover
+      if (!editingCell && !isEditingInInputBar) {
+        const newCellValue = getCellValue(row, col);
+        setInputValue(String(newCellValue || ''));
+      }
     }
-  }, [editingCell, commitEdit, handleAutoExpansion, selectedCell]);
+  }, [editingCell, commitEdit, handleAutoExpansion, selectedCell, isEditingInInputBar, getCellValue]);
 
   const handleMouseDown = useCallback((row: number, col: number, event: React.MouseEvent) => {
     // Don't interfere with double-click events
@@ -1454,8 +1566,11 @@ const ExcelSpreadsheet: React.FC = memo(() => {
       return;
     }
     
-    if (editingCell) {
+    // CRITICAL FIX: Clear editing state immediately when clicking elsewhere
+    if (editingCell || isEditingInInputBar) {
       commitEdit();
+      setEditingCell(null);
+      setIsEditingInInputBar(false);
     }
     
     if (!event.shiftKey) {
@@ -1465,7 +1580,7 @@ const ExcelSpreadsheet: React.FC = memo(() => {
       setSelectedRange(null);
       setIsSelecting(true);
     }
-  }, [editingCell, commitEdit]);
+  }, [editingCell, commitEdit, isEditingInInputBar]);
 
   const handleMouseEnter = useCallback((row: number, col: number) => {
     if (fillHandleActive) {
@@ -1649,18 +1764,25 @@ const ExcelSpreadsheet: React.FC = memo(() => {
   const handleCellDoubleClick = useCallback((row: number, col: number, startWithKey?: string) => {
     const currentValue = getCellValue(row, col);
     
-    // Enter editing mode
+    // Enter editing mode - clear input bar editing
+    setIsEditingInInputBar(false);
     setEditingCell({ row, col });
     setInputValue(startWithKey || String(currentValue));
     setSelectedCell({ row, col });
     setSelectedRange(null);
     setCopiedData(null);
     
-    // Focus input with retry logic
+    // CRITICAL FIX: Set fresh edit flag for proper text selection
+    setIsFreshEdit(true);
+    
+    // Focus input with retry logic and select all text
     const focusInput = () => {
       if (inputRef.current) {
         inputRef.current.focus();
-        inputRef.current.select();
+        // Select all text on fresh edit (double-click or new character)
+        if (isFreshEdit) {
+          inputRef.current.select();
+        }
       } else {
         setTimeout(focusInput, 5);
       }
@@ -1671,7 +1793,7 @@ const ExcelSpreadsheet: React.FC = memo(() => {
     setTimeout(focusInput, 5);
     setTimeout(focusInput, 10);
     setTimeout(focusInput, 20);
-  }, [getCellValue]);
+  }, [getCellValue, isFreshEdit]);
 
   const handleArrowKey = useCallback((key: string, row: number, col: number, shiftKey: boolean = false) => {
     let newRow = row;
@@ -1764,47 +1886,90 @@ const ExcelSpreadsheet: React.FC = memo(() => {
     }
 
     if (e.key === 'Enter') {
-      if (editingCell) {
+      if (editingCell || isEditingInInputBar) {
         commitEdit();
+        // CRITICAL FIX: Clear editing state immediately
+        setEditingCell(null);
+        setIsEditingInInputBar(false);
         setSelectedCell({ row: row + 1, col });
+        // Load new cell value immediately
+        const newCellValue = getCellValue(row + 1, col);
+        setInputValue(String(newCellValue || ''));
       } else {
         handleCellDoubleClick(row, col);
       }
       e.preventDefault();
     } else if (e.key === 'Tab') {
-      if (editingCell) {
+      if (editingCell || isEditingInInputBar) {
         commitEdit();
+        // CRITICAL FIX: Clear editing state immediately
+        setEditingCell(null);
+        setIsEditingInInputBar(false);
       }
-      setSelectedCell({ 
-        row, 
-        col: e.shiftKey ? Math.max(0, col - 1) : col + 1 
-      });
+      const newCol = e.shiftKey ? Math.max(0, col - 1) : col + 1;
+      setSelectedCell({ row, col: newCol });
+      // Load new cell value immediately
+      const newCellValue = getCellValue(row, newCol);
+      setInputValue(String(newCellValue || ''));
       e.preventDefault();
     } else if (e.key === 'Escape') {
       if (editingCell) {
         setEditingCell(null);
+        setIsFreshEdit(false); // Clear fresh edit flag
         setInputValue('');
+      } else if (isEditingInInputBar) {
+        setIsEditingInInputBar(false);
+        setEditingCell(null);
+        setIsFreshEdit(false); // Clear fresh edit flag
+        // Restore original value
+        const originalValue = getCellValue(row, col);
+        setInputValue(String(originalValue || ''));
+      }
+    } else if (e.key === 'F2') {
+      e.preventDefault();
+      if (!editingCell && !isEditingInInputBar) {
+        // Start editing in input bar
+        setIsEditingInInputBar(true);
+        setEditingCell({ row, col });
+        const currentValue = getCellValue(row, col);
+        setInputValue(String(currentValue || ''));
+      } else if (editingCell && !isEditingInInputBar) {
+        // Switch from cell editing to input bar editing
+        setEditingCell(null);
+        setIsEditingInInputBar(true);
+        setEditingCell({ row, col });
       }
     } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown' || 
                e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-      if (!editingCell) {
+      if (!editingCell && !isEditingInInputBar) {
         handleArrowKey(e.key, row, col, e.shiftKey);
         e.preventDefault();
       }
-    } else if (!editingCell && e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
+    } else if (!editingCell && !isEditingInInputBar && e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
       // Clear copied data when starting to type
       setCopiedData(null);
       // Start editing if user types a character
       handleCellDoubleClick(row, col, e.key);
     }
-  }, [editingCell, copySelectedCells, handlePasteFromClipboard, cutSelectedCells, selectAllCells, canRedo, redo, canUndo, undo, deleteSelectedCells, handleCellDoubleClick, commitEdit, handleArrowKey]);
+  }, [editingCell, copySelectedCells, handlePasteFromClipboard, cutSelectedCells, selectAllCells, canRedo, redo, canUndo, undo, deleteSelectedCells, handleCellDoubleClick, commitEdit, handleArrowKey, isEditingInInputBar, getCellValue]);
 
 
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    // Save cursor position before state update
-    cursorPositionRef.current = e.target.selectionStart || 0;
-    setInputValue(e.target.value);
+    const newValue = e.target.value;
+    setInputValue(newValue);
+    
+    // Clear fresh edit flag on first keystroke
+    if (isFreshEdit) {
+      setIsFreshEdit(false);
+    }
+    
+    // LIVE SYNC: Update cell value immediately for live sync with formula bar
+    if (editingCell) {
+      setCellValueDirect(editingCell.row, editingCell.col, newValue);
+    }
+    
+    // Don't save cursor position - let browser handle it naturally
   };
 
   const handleInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -1824,6 +1989,7 @@ const ExcelSpreadsheet: React.FC = memo(() => {
       e.preventDefault();
     } else if (e.key === 'Escape') {
       setEditingCell(null);
+      setIsFreshEdit(false); // Clear fresh edit flag
       setInputValue('');
     }
   };
@@ -1913,12 +2079,28 @@ const ExcelSpreadsheet: React.FC = memo(() => {
             value={inputValue}
             onChange={handleInputChange}
             onKeyDown={handleInputKeyDown}
-            onBlur={commitEdit}
             className="cell-input"
             style={contentStyle}
             autoFocus
             onFocus={(e) => {
-              e.target.select();
+              // CRITICAL FIX: Only select all text on fresh double-click edit
+              if (isFreshEdit) {
+                e.target.select();
+                setIsFreshEdit(false); // Clear flag after first interaction
+              }
+              e.stopPropagation();
+            }}
+            onMouseDown={(e) => {
+              // CRITICAL FIX: Prevent cell click handler from triggering
+              e.stopPropagation();
+            }}
+            onClick={(e) => {
+              // CRITICAL FIX: Allow natural cursor positioning
+              e.stopPropagation();
+            }}
+            onSelect={(e) => {
+              // CRITICAL FIX: Allow text selection
+              e.stopPropagation();
             }}
           />
         ) : (
@@ -2079,6 +2261,18 @@ const ExcelSpreadsheet: React.FC = memo(() => {
         canPaste={!!copiedData || true}
         selectedCellValue={selectedCell ? getCellValue(selectedCell.row, selectedCell.col) : null}
         onInsertLink={handleInsertLink}
+      />
+
+      {/* Formula Input Bar */}
+      <FormulaInputBar
+        value={inputValue}
+        onChange={handleInputBarChange}
+        onKeyDown={handleInputBarKeyDown}
+        onFocus={handleInputBarFocus}
+        onBlur={handleInputBarBlur}
+        isActive={isEditingInInputBar}
+        selectedCellAddress={selectedCell ? getCellAddress(selectedCell.row, selectedCell.col) : 'A1'}
+        className={isEditingInInputBar ? 'active' : ''}
       />
 
       <style>{`
