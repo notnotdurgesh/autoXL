@@ -1,4 +1,5 @@
 import ExcelSpreadsheet from './components/ExcelSpreadsheet'
+import DemoDisclaimer from './components/DemoDisclaimer'
 import './App.css'
 
 function App() {
@@ -14,6 +15,7 @@ function App() {
       left: 0
     }}>
       <ExcelSpreadsheet />
+      <DemoDisclaimer />
     </div>
   )
 }

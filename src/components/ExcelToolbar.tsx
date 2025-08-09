@@ -1,10 +1,11 @@
 import React, { useState, useRef, useEffect, memo, useCallback } from 'react';
+import { HexColorPicker } from 'react-colorful';
 import {
   AlignLeft, AlignCenter, AlignRight,
   AlignStartVertical, AlignCenterVertical, AlignEndVertical,
   Bold, Italic, Underline, Strikethrough, Type, Palette, 
   Plus, Minus, ChevronDown, Undo2, Redo2,
-  Copy, Clipboard, DollarSign, Percent, Link,
+  Copy, Scissors, Clipboard, DollarSign, Percent, Link,
   Hash, Calendar, Clock
 } from 'lucide-react';
 import type { CellFormatting } from './ExcelSpreadsheet';
@@ -14,6 +15,7 @@ interface ExcelToolbarProps {
   onUndo: () => void;
   onRedo: () => void;
   onCopy?: () => void;
+  onCut?: () => void;
   onPaste?: () => void;
   currentFormatting: CellFormatting;
   canUndo: boolean;
@@ -21,6 +23,7 @@ interface ExcelToolbarProps {
   canPaste?: boolean;
   selectedCellValue?: string | number | null;
   onInsertLink: (url: string, text?: string) => void;
+  onOpenAI?: () => void;
 }
 
 // Memoized constants for better performance
@@ -52,14 +55,18 @@ const ExcelToolbar: React.FC<ExcelToolbarProps> = memo(({
   onUndo,
   onRedo,
   onCopy,
+  onCut,
   onPaste,
   currentFormatting,
   canUndo,
   canRedo,
   canPaste = true,
   selectedCellValue,
-  onInsertLink
+  onInsertLink,
+  onOpenAI
 }) => {
+  const onOpenAIRef = useRef<typeof onOpenAI>(onOpenAI);
+  useEffect(() => { onOpenAIRef.current = onOpenAI; }, [onOpenAI]);
   const [showFontFamilyDropdown, setShowFontFamilyDropdown] = useState(false);
   const [showFontSizeDropdown, setShowFontSizeDropdown] = useState(false);
   const [showTextColorPicker, setShowTextColorPicker] = useState(false);
@@ -293,6 +300,13 @@ const ExcelToolbar: React.FC<ExcelToolbarProps> = memo(({
     </div>
   ));
 
+  const Picker: React.FC<{ color: string; onChange: (c: string) => void; footer?: React.ReactNode }> = memo(({ color, onChange, footer }) => (
+    <div className="colorful-wrapper">
+      <HexColorPicker color={color} onChange={onChange} />
+      {footer}
+    </div>
+  ));
+
   return (
     <>
       <style>{`
@@ -352,6 +366,18 @@ const ExcelToolbar: React.FC<ExcelToolbarProps> = memo(({
           background: #007bff;
           color: white;
           border-color: #0056b3;
+        }
+
+        /* AI button styling to match floating FAB color */
+        .toolbar-btn.ai-toolbar-btn {
+          background: linear-gradient(135deg, #0d6efd 0%, #0a58ca 100%);
+          color: #ffffff;
+          border-color: transparent;
+        }
+        .toolbar-btn.ai-toolbar-btn:hover:not(.disabled) {
+          box-shadow: 0 4px 12px rgba(13,110,253,0.3);
+          transform: translateY(-1px);
+          color: #000000; /* icon black on hover */
         }
 
         .toolbar-btn.disabled {
@@ -517,6 +543,21 @@ const ExcelToolbar: React.FC<ExcelToolbarProps> = memo(({
           border-color: #007bff;
           box-shadow: 0 0 0 1px #007bff;
         }
+
+        .custom-color-row {
+          display: flex; align-items: center; gap: 6px; margin-top: 8px;
+        }
+        .custom-color-input { width: 28px; height: 28px; padding: 0; border: 1px solid #dee2e6; border-radius: 4px; }
+        .custom-color-hex { flex: 1; height: 28px; padding: 0 8px; border: 1px solid #dee2e6; border-radius: 4px; font-size: 12px; }
+        .custom-color-apply { height: 28px; padding: 0 8px; border: 1px solid #ced4da; background: #ffffff; border-radius: 4px; font-size: 12px; cursor: pointer; }
+        .custom-color-apply:hover { background: #f1f3f5; }
+
+        /* react-colorful integration */
+        .colorful-wrapper { padding: 8px; border-top: 1px solid #f1f3f5; background: #ffffff; }
+        .colorful-wrapper .react-colorful { width: 200px; height: 130px; }
+        .colorful-wrapper .react-colorful__saturation { border-radius: 6px; }
+        .colorful-wrapper .react-colorful__hue { height: 10px; border-radius: 10px; margin-top: 8px; }
+        .colorful-wrapper .react-colorful__interactive { box-shadow: inset 0 0 0 1px rgba(0,0,0,0.05); }
 
         .color-preview {
           width: 16px;
@@ -989,7 +1030,7 @@ const ExcelToolbar: React.FC<ExcelToolbarProps> = memo(({
           />
         </div>
 
-        {/* Links & Actions */}
+        {/* Links */}
         <div className="toolbar-section compact">
           <ToolbarButton
             icon={<Link size={14} />}
@@ -1005,6 +1046,12 @@ const ExcelToolbar: React.FC<ExcelToolbarProps> = memo(({
             title="Copy (Ctrl+C)"
             onClick={onCopy || (() => {})}
             disabled={!onCopy}
+          />
+          <ToolbarButton
+            icon={<Scissors size={14} />}
+            title="Cut (Ctrl+X)"
+            onClick={onCut || (() => {})}
+            disabled={!onCut}
           />
           <ToolbarButton
             icon={<Clipboard size={14} />}
@@ -1029,6 +1076,17 @@ const ExcelToolbar: React.FC<ExcelToolbarProps> = memo(({
             disabled={!canRedo}
           />
         </div>
+
+        {/* AI Assistant */}
+        {/* <div className="toolbar-section compact">
+          <ToolbarButton
+            icon={<Wand2 size={14} />}
+            title="click to open chat"
+            onClick={() => (typeof (onOpenAIRef?.current) === 'function' ? onOpenAIRef.current() : undefined)}
+            disabled={false}
+            className="ai-toolbar-btn"
+          />
+        </div> */}
       </div>
 
       {/* Dropdowns */}
@@ -1088,12 +1146,23 @@ const ExcelToolbar: React.FC<ExcelToolbarProps> = memo(({
         onClose={() => setShowTextColorPicker(false)}
         reference={textColorRef}
       >
-        <ColorPalette
-          onColorSelect={(color) => {
-            onFormat({ color });
-            setShowTextColorPicker(false);
-          }}
-        />
+        <div>
+          <ColorPalette
+            onColorSelect={(color) => {
+              onFormat({ color });
+              setShowTextColorPicker(false);
+            }}
+          />
+          <Picker 
+            color={currentFormatting.color || '#000000'}
+            onChange={(color) => onFormat({ color })}
+            footer={
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8 }}>
+                <button className="custom-color-apply" onClick={() => setShowTextColorPicker(false)}>Done</button>
+              </div>
+            }
+          />
+        </div>
       </Dropdown>
 
       <Dropdown
@@ -1101,12 +1170,23 @@ const ExcelToolbar: React.FC<ExcelToolbarProps> = memo(({
         onClose={() => setShowBgColorPicker(false)}
         reference={bgColorRef}
       >
-        <ColorPalette
-          onColorSelect={(color) => {
-            onFormat({ backgroundColor: color });
-            setShowBgColorPicker(false);
-          }}
-        />
+        <div>
+          <ColorPalette
+            onColorSelect={(color) => {
+              onFormat({ backgroundColor: color });
+              setShowBgColorPicker(false);
+            }}
+          />
+          <Picker 
+            color={currentFormatting.backgroundColor || '#FFFFFF'}
+            onChange={(color) => onFormat({ backgroundColor: color })}
+            footer={
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8 }}>
+                <button className="custom-color-apply" onClick={() => setShowBgColorPicker(false)}>Done</button>
+              </div>
+            }
+          />
+        </div>
       </Dropdown>
 
       {/* Number Format Dropdown */}
