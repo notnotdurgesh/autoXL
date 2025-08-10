@@ -11,10 +11,8 @@ export class GeminiService {
   private chat!: ChatSession;
   private functionHandlers: Map<string, (args: Record<string, unknown>) => Promise<unknown>>;
   private modelId: string = 'gemini-2.5-flash-lite';
-  private apiKey: string;
 
   constructor(apiKey: string) {
-    this.apiKey = apiKey;
     this.genAI = new GoogleGenerativeAI(apiKey);
     this.functionHandlers = new Map();
     this.initializeModel();
@@ -490,72 +488,71 @@ export class GeminiService {
   }
 
   // Send with Gemini thinking via REST (config.thinkingConfig)
-  private async sendWithThinking(
-    formattedHistory: Array<{ role: string; parts: Array<{ text: string }> }> ,
-    userParts: Array<Record<string, unknown>>
-  ): Promise<ChatMessage[]> {
-    const responses: ChatMessage[] = [];
-    try {
-      const body: Record<string, unknown> = {
-        // Maintain roles for REST
-        contents: [
-          ...formattedHistory.map(h => ({ role: h.role, parts: h.parts })),
-          { role: 'user', parts: userParts.length > 0 ? userParts : [{ text: '' }] },
-        ],
-        systemInstruction: { parts: [{ text: systemInstruction }] },
-        tools: [ { functionDeclarations: allFunctionDeclarations } ],
-        toolConfig: { functionCallingConfig: { mode: FunctionCallingMode.AUTO } },
-        generationConfig: {
-          temperature: 0.5,
-          topP: 0.9,
-          topK: 20,
-          maxOutputTokens: 2048,
-          candidateCount: 1,
-          thinkingConfig: {
-            thinkingBudget: -1,
-            includeThoughts: true,
-          },
-        },
-      };
+  // private async sendWithThinking(
+  //   formattedHistory: Array<{ role: string; parts: Array<{ text: string }> }> ,
+  //   userParts: Array<Record<string, unknown>>
+  // ): Promise<ChatMessage[]> {
+  //   const responses: ChatMessage[] = [];
+  //   try {
+  //     const body: Record<string, unknown> = {
+  //       // Maintain roles for REST
+  //       contents: [
+  //         ...formattedHistory.map(h => ({ role: h.role, parts: h.parts })),
+  //         { role: 'user', parts: userParts.length > 0 ? userParts : [{ text: '' }] },
+  //       ],
+  //       systemInstruction: { parts: [{ text: systemInstruction }] },
+  //       tools: [ { functionDeclarations: allFunctionDeclarations } ],
+  //       toolConfig: { functionCallingConfig: { mode: FunctionCallingMode.AUTO } },
+  //       generationConfig: {
+  //         temperature: 0.5,
+  //         topP: 0.9,
+  //         topK: 20,
+  //         maxOutputTokens: 2048,
+  //         candidateCount: 1,
+  //         thinkingConfig: {
+  //           thinkingBudget: -1,
+  //           includeThoughts: true,
+  //         },
+  //       },
+  //     };
 
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.modelId}:generateContent`;
-      const resp = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': this.apiKey,
-        },
-        body: JSON.stringify(body),
-      });
-      if (!resp.ok) {
-        const text = await resp.text();
-        throw new Error(text);
-      }
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const data: any = await resp.json();
+  //     const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.modelId}:generateContent`;
+  //     const resp = await fetch(url, {
+  //       method: 'POST',
+  //       headers: {
+  //         'Content-Type': 'application/json',
+  //         'x-goog-api-key': this.apiKey,
+  //       },
+  //       body: JSON.stringify(body),
+  //     });
+  //     if (!resp.ok) {
+  //       const text = await resp.text();
+  //       throw new Error(text);
+  //     }
+  //     // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  //     const data: any = await resp.json();
 
-      // If thoughts are included, we may receive thought parts; we keep them internal
-      const assistantText = data?.candidates?.[0]?.content?.parts?.map((p: { text?: string }) => p.text).filter(Boolean).join('') || '';
-      if (assistantText) {
-        responses.push({
-          id: this.generateId(),
-          role: 'assistant',
-          content: assistantText,
-          timestamp: new Date(),
-        });
-      }
-      return responses;
-    } catch (error) {
-      responses.push({
-        id: this.generateId(),
-        role: 'assistant',
-        content: `I encountered an error: ${error}`,
-        timestamp: new Date(),
-      });
-      return responses;
-    }
-  }
-
+  //     // If thoughts are included, we may receive thought parts; we keep them internal
+  //     const assistantText = data?.candidates?.[0]?.content?.parts?.map((p: { text?: string }) => p.text).filter(Boolean).join('') || '';
+  //     if (assistantText) {
+  //       responses.push({
+  //         id: this.generateId(),
+  //         role: 'assistant',
+  //         content: assistantText,
+  //         timestamp: new Date(),
+  //       });
+  //     }
+  //     return responses;
+  //   } catch (error) {
+  //     responses.push({
+  //       id: this.generateId(),
+  //       role: 'assistant',
+  //       content: `I encountered an error: ${error}`,
+  //       timestamp: new Date(),
+  //     });
+  //     return responses;
+  //   }
+  // }
   // Best-effort: append grounding links from response if available
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private appendGroundingCitationsSafely(resp: any, baseText: string): string {
