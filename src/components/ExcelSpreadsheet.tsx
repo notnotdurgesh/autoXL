@@ -77,6 +77,13 @@ const ExcelSpreadsheet: React.FC = memo(() => {
   const workerRef = useRef<Worker | null>(null);
   const pendingRequestsRef = useRef(new Map<string, (value: unknown) => void>());
   
+  // Local persistence state
+  const LOCAL_STORAGE_KEY = 'autoxl_sheet_state_v0.69';
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [isDirty, setIsDirty] = useState<boolean>(false);
+  const isHydratingFromStorageRef = useRef<boolean>(false);
+  const lastSavedFingerprintRef = useRef<string | null>(null);
+  
   // Performance optimization: Track pending selection updates
   const pendingSelectionRef = useRef<CellRange | null>(null);
   const selectionUpdateRAFRef = useRef<number | null>(null);
@@ -447,6 +454,125 @@ const ExcelSpreadsheet: React.FC = memo(() => {
     };
   }, []);
 
+  // ---- Local Storage: load on mount ----
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
+      if (!raw) {
+        // No saved state: establish baseline fingerprint from initial defaults (data + formatting only)
+        const baseline = JSON.stringify({
+          sheetData: {},
+          columnWidths: {},
+          rowHeights: {}
+        });
+        lastSavedFingerprintRef.current = baseline;
+        setIsDirty(false);
+        return;
+      }
+      const parsed = JSON.parse(raw) as {
+        version: number;
+        lastSavedAt?: number;
+        data?: {
+          sheetData?: SheetData;
+          columnWidths?: { [key: number]: number };
+          rowHeights?: { [key: number]: number };
+          visibleRows?: number;
+          visibleCols?: number;
+        };
+      };
+      if (!parsed || typeof parsed !== 'object') return;
+
+      isHydratingFromStorageRef.current = true;
+      if (parsed.data?.sheetData) setSheetData(parsed.data.sheetData);
+      if (parsed.data?.columnWidths) setColumnWidths(parsed.data.columnWidths);
+      if (parsed.data?.rowHeights) setRowHeights(parsed.data.rowHeights);
+      if (typeof parsed.data?.visibleRows === 'number') setVisibleRows(Math.max(MIN_VISIBLE_ROWS, parsed.data.visibleRows));
+      if (typeof parsed.data?.visibleCols === 'number') setVisibleCols(Math.max(MIN_VISIBLE_COLS, parsed.data.visibleCols));
+      // Establish baseline fingerprint from saved data and mark clean
+      const baseline = JSON.stringify({
+        sheetData: parsed.data?.sheetData ?? {},
+        columnWidths: parsed.data?.columnWidths ?? {},
+        rowHeights: parsed.data?.rowHeights ?? {}
+      });
+      lastSavedFingerprintRef.current = baseline;
+      setIsDirty(false);
+    } catch (e) {
+      console.error('Failed to load sheet from local storage', e);
+    } finally {
+      // Allow dirty tracking after hydration completes in next tick
+      setTimeout(() => { isHydratingFromStorageRef.current = false; }, 0);
+    }
+  }, []);
+
+  // Mark dirty on meaningful state changes (but not during hydration)
+  useEffect(() => {
+    if (isHydratingFromStorageRef.current) return;
+    const current = JSON.stringify({
+      sheetData,
+      columnWidths,
+      rowHeights
+    });
+    setIsDirty(current !== lastSavedFingerprintRef.current);
+  }, [sheetData, columnWidths, rowHeights]);
+
+  // Serialize and save to localStorage
+  const saveToLocalStorage = useCallback((reason: 'manual' | 'auto' | 'implicit' = 'implicit') => {
+    try {
+      setSaveStatus('saving');
+      const payload = {
+        version: 1,
+        lastSavedAt: Date.now(),
+        data: {
+          sheetData: deepClone(sheetData),
+          columnWidths: deepClone(columnWidths),
+          rowHeights: deepClone(rowHeights),
+          visibleRows,
+          visibleCols
+        },
+        reason
+      } as const;
+      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(payload));
+      // Update baseline fingerprint to current saved state
+      lastSavedFingerprintRef.current = JSON.stringify({
+        sheetData: payload.data.sheetData,
+        columnWidths: payload.data.columnWidths,
+        rowHeights: payload.data.rowHeights
+      });
+      // lastSavedAt removed from UI; stored in payload for potential future use
+      setIsDirty(false);
+      setSaveStatus('saved');
+      // Briefly show "Saved" then hide banner
+      window.setTimeout(() => setSaveStatus('idle'), 1200);
+    } catch (e) {
+      console.error('Failed to save sheet to local storage', e);
+      setSaveStatus('error');
+    }
+  }, [sheetData, columnWidths, rowHeights, visibleRows, visibleCols, deepClone]);
+
+  // Autosave every 3 minutes if dirty
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      if (isDirty) {
+        saveToLocalStorage('auto');
+      }
+    }, 3 * 60 * 1000);
+    return () => window.clearInterval(intervalId);
+  }, [isDirty, saveToLocalStorage]);
+
+  // Manual save via Ctrl+S / Cmd+S
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const isModifier = e.ctrlKey || e.metaKey;
+      if (isModifier && (e.key === 's' || e.key === 'S')) {
+        e.preventDefault();
+        e.stopPropagation();
+        saveToLocalStorage('manual');
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [saveToLocalStorage]);
+
   // Virtual scrolling calculations - compute from live scroll positions
   const getViewport = useCallback(() => {
     if (!shouldUseVirtualScrolling) {
@@ -541,63 +667,63 @@ const ExcelSpreadsheet: React.FC = memo(() => {
     }
     // Defer initial data setup to improve initial render performance
     runWhenIdle(() => {
-      const initialData: SheetData = {};
+      // const initialData: SheetData = {};
     
     // Set sample data exactly as in the original
-    const setInitialCellValue = (row: number, col: number, value: string | number) => {
-      if (!initialData[row]) initialData[row] = {};
-      initialData[row][col] = { value };
-    };
+    // const setInitialCellValue = (row: number, col: number, value: string | number) => {
+    //   if (!initialData[row]) initialData[row] = {};
+    //   initialData[row][col] = { value };
+    // };
 
-    setInitialCellValue(0, 1, 'Tesla');
-    setInitialCellValue(0, 2, 'Volvo');
-    setInitialCellValue(0, 3, 'Toyota');
-    setInitialCellValue(0, 4, 'Ford');
-    setInitialCellValue(0, 5, 'Total');
+    // setInitialCellValue(0, 1, 'Tesla');
+    // setInitialCellValue(0, 2, 'Volvo');
+    // setInitialCellValue(0, 3, 'Toyota');
+    // setInitialCellValue(0, 4, 'Ford');
+    // setInitialCellValue(0, 5, 'Total');
 
-    setInitialCellValue(1, 0, '2019');
-    setInitialCellValue(1, 1, 10);
-    setInitialCellValue(1, 2, 11);
-    setInitialCellValue(1, 3, 12);
-    setInitialCellValue(1, 4, 13);
-    setInitialCellValue(1, 5, 46);
+    // setInitialCellValue(1, 0, '2019');
+    // setInitialCellValue(1, 1, 10);
+    // setInitialCellValue(1, 2, 11);
+    // setInitialCellValue(1, 3, 12);
+    // setInitialCellValue(1, 4, 13);
+    // setInitialCellValue(1, 5, 46);
 
-    setInitialCellValue(2, 0, '2020');
-    setInitialCellValue(2, 1, 20);
-    setInitialCellValue(2, 2, 11);
-    setInitialCellValue(2, 3, 14);
-    setInitialCellValue(2, 4, 13);
-    setInitialCellValue(2, 5, 58);
+    // setInitialCellValue(2, 0, '2020');
+    // setInitialCellValue(2, 1, 20);
+    // setInitialCellValue(2, 2, 11);
+    // setInitialCellValue(2, 3, 14);
+    // setInitialCellValue(2, 4, 13);
+    // setInitialCellValue(2, 5, 58);
 
-    setInitialCellValue(3, 0, '2021');
-    setInitialCellValue(3, 1, 30);
-    setInitialCellValue(3, 2, 15);
-    setInitialCellValue(3, 3, 12);
-    setInitialCellValue(3, 4, 13);
-    setInitialCellValue(3, 5, 70);
+    // setInitialCellValue(3, 0, '2021');
+    // setInitialCellValue(3, 1, 30);
+    // setInitialCellValue(3, 2, 15);
+    // setInitialCellValue(3, 3, 12);
+    // setInitialCellValue(3, 4, 13);
+    // setInitialCellValue(3, 5, 70);
 
-    setInitialCellValue(4, 0, 'Total');
-    setInitialCellValue(4, 1, 60);
-    setInitialCellValue(4, 2, 37);
-    setInitialCellValue(4, 3, 38);
-    setInitialCellValue(4, 4, 39);
-    setInitialCellValue(4, 5, 174);
+    // setInitialCellValue(4, 0, 'Total');
+    // setInitialCellValue(4, 1, 60);
+    // setInitialCellValue(4, 2, 37);
+    // setInitialCellValue(4, 3, 38);
+    // setInitialCellValue(4, 4, 39);
+    // setInitialCellValue(4, 5, 174);
 
-    setInitialCellValue(6, 0, 'Profit');
-    setInitialCellValue(6, 1, 5);
-    setInitialCellValue(6, 2, 8);
-    setInitialCellValue(6, 3, 6);
-    setInitialCellValue(6, 4, 9);
-    setInitialCellValue(6, 5, 28);
+    // setInitialCellValue(6, 0, 'Profit');
+    // setInitialCellValue(6, 1, 5);
+    // setInitialCellValue(6, 2, 8);
+    // setInitialCellValue(6, 3, 6);
+    // setInitialCellValue(6, 4, 9);
+    // setInitialCellValue(6, 5, 28);
 
-    setInitialCellValue(7, 0, 'Margin %');
-    setInitialCellValue(7, 1, 8.33);
-    setInitialCellValue(7, 2, 21.62);
-    setInitialCellValue(7, 3, 15.79);
-    setInitialCellValue(7, 4, 23.08);
-    setInitialCellValue(7, 5, 16.09);
+    // setInitialCellValue(7, 0, 'Margin %');
+    // setInitialCellValue(7, 1, 8.33);
+    // setInitialCellValue(7, 2, 21.62);
+    // setInitialCellValue(7, 3, 15.79);
+    // setInitialCellValue(7, 4, 23.08);
+    // setInitialCellValue(7, 5, 16.09);
 
-      setSheetData(initialData);
+    //   setSheetData(initialData);
     }, 10, 1000);
   }, []); // FIXED: Empty dependency array so this only runs once on mount
 
@@ -3509,6 +3635,61 @@ const ExcelSpreadsheet: React.FC = memo(() => {
 
   return (
     <div className="spreadsheet-container" tabIndex={0} onFocus={() => {}} onClick={() => {}}>
+      {/* Save status banner (full-width above toolbar) */}
+      {(() => {
+        // Show banner when unsaved, saving, saved (brief), or error
+        const show = isDirty || saveStatus === 'saving' || saveStatus === 'saved' || saveStatus === 'error';
+        if (!show) return null;
+
+        let text = '';
+        let bg = '#f8f9fa';
+        let border = '#dee2e6';
+        let color = '#2d3748';
+        if (saveStatus === 'saving') {
+          text = 'Saving…';
+          bg = '#fffbe6';
+          border = '#ffe58f';
+          color = '#8b6d00';
+        } else if (saveStatus === 'saved') {
+          text = 'Saved';
+          bg = '#f6ffed';
+          border = '#b7eb8f';
+          color = '#237804';
+        } else if (saveStatus === 'error') {
+          text = 'Save failed';
+          bg = '#fff1f0';
+          border = '#ffa39e';
+          color = '#a8071a';
+        } else {
+          text = 'Unsaved changes';
+          bg = '#e6f7ff';
+          border = '#91d5ff';
+          color = '#0050b3';
+        }
+
+        return (
+          <div
+            style={{
+              position: 'sticky',
+              top: 0,
+              zIndex: 101,
+              width: '100%',
+              background: bg,
+              borderBottom: `1px solid ${border}`,
+              color,
+              padding: '3px 10px',
+              fontSize: 11,
+              lineHeight: '18px',
+              textAlign: 'left'
+            }}
+            aria-live="polite"
+            role="status"
+          >
+            {text}
+          </div>
+        );
+      })()}
+
       {/* Excel Toolbar */}
       <ExcelToolbar
         onFormat={formatSelectedCells}
@@ -3528,6 +3709,7 @@ const ExcelSpreadsheet: React.FC = memo(() => {
           window.dispatchEvent(evt);
         }}
       />
+
 
       {/* Formula Input Bar */}
       <FormulaInputBar
