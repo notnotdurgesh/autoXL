@@ -1,4 +1,8 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import rehypeHighlight from 'rehype-highlight';
+import 'highlight.js/styles/github.css';
 import { Send, Bot, User, X, Minimize2, Maximize2, Trash2, Settings, AlertCircle, FileText, Upload, File, FileSpreadsheet, FileJson, Sparkles } from 'lucide-react';
 import { type ChatMessage, type CellAttachment, type FileAttachment } from '../types/ai.types';
 import { GeminiService } from '../services/gemini/geminiService';
@@ -272,18 +276,25 @@ const AIChat: React.FC<AIChatProps> = ({ spreadsheetOperations, hideFab = false 
     geminiServiceRef.current?.resetChat();
   };
 
-  // Format message content
-  const formatMessageContent = (content: string) => {
-    // Convert markdown-style formatting
-    return content
-      .split('\n')
-      .map((line, i) => {
-        if (line.startsWith('•')) {
-          return <li key={i} style={{ marginLeft: '20px' }}>{line.substring(1).trim()}</li>;
-        }
-        return <div key={i}>{line || <br />}</div>;
-      });
-  };
+  // Markdown rendering configuration (trusted libs)
+  const markdownComponents = {
+    a: (props: React.AnchorHTMLAttributes<HTMLAnchorElement>) => (
+      <a target="_blank" rel="noopener noreferrer" {...props} />
+    ),
+    code: ({ className, children, ...props }: { className?: string; children?: React.ReactNode }) => (
+      <code className={className} {...props}>{children}</code>
+    ),
+  } as const;
+
+  const renderMarkdown = (content: string) => (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      rehypePlugins={[rehypeHighlight]}
+      components={markdownComponents}
+    >
+      {content}
+    </ReactMarkdown>
+  );
 
 
 
@@ -902,7 +913,7 @@ const AIChat: React.FC<AIChatProps> = ({ spreadsheetOperations, hideFab = false 
                         }}>
                           {message.content}
                         </div>
-                      ) : formatMessageContent(message.content)}
+                      ) : renderMarkdown(message.content)}
 
 
 

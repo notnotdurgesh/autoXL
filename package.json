@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
+    "highlight.js": "^11.9.0",
     "file-type": "^21.0.0",
     "html2canvas": "^1.4.1",
     "jspdf": "^3.0.1",
@@ -19,8 +20,11 @@
     "papaparse": "^5.5.3",
     "pdfjs-dist": "^5.4.54",
     "react": "^19.1.0",
+    "react-markdown": "^9.0.3",
     "react-colorful": "^5.6.1",
     "react-dom": "^19.1.0",
+    "rehype-highlight": "^7.0.1",
+    "remark-gfm": "^4.0.0",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
