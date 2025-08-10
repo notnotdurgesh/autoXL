@@ -9,7 +9,7 @@ export interface ParsedFile {
   rows?: number;
   columns?: number;
   preview: string;
-  format: 'csv' | 'excel' | 'json' | 'text' | 'pdf' | 'word' | 'unknown';
+  format: 'csv' | 'excel' | 'json' | 'text' | 'pdf' | 'word' | 'image' | 'unknown';
 }
 
 export class FileParser {
@@ -43,6 +43,19 @@ export class FileParser {
         return await this.parseJSON(file);
       }
 
+      // PDF Files
+      if (type === 'application/pdf' || extension === 'pdf') {
+        return await this.parsePDF(file);
+      }
+
+      // Word (DOCX) Files
+      if (
+        type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+        extension === 'docx'
+      ) {
+        return await this.parseWord(file);
+      }
+
       // TSV Files
       if (extension === 'tsv' || extension === 'tab') {
         return await this.parseTSV(file);
@@ -51,6 +64,11 @@ export class FileParser {
       // Text Files
       if (type.startsWith('text/') || ['txt', 'log', 'md'].includes(extension)) {
         return await this.parseText(file);
+      }
+
+      // Images (PNG, JPEG, WEBP, GIF, BMP)
+      if (type.startsWith('image/') || ['png','jpg','jpeg','webp','gif','bmp'].includes(extension)) {
+        return await this.parseImage(file);
       }
 
       // Default: treat as text
@@ -203,6 +221,115 @@ export class FileParser {
       content: text,
       preview,
       format: 'text'
+    };
+  }
+
+  // Best-effort PDF text extraction for preview (first ~1500 chars)
+  // Falls back gracefully if PDF.js fails (e.g., worker issues)
+  private static async parsePDF(file: File): Promise<ParsedFile> {
+    const arrayBuffer = await file.arrayBuffer();
+    let preview = 'PDF document';
+    let textContent = '';
+    try {
+      // Lazy load pdfjs-dist to avoid bundling cost until needed
+      // Use modern build; bundlers handle worker if configured. Graceful catch otherwise.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const pdfjs: any = await import('pdfjs-dist/build/pdf');
+      // Attempt to set worker if available in ESM build; ignore if not
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const worker = await import('pdfjs-dist/build/pdf.worker.mjs');
+        if (worker && pdfjs && pdfjs.GlobalWorkerOptions) {
+          pdfjs.GlobalWorkerOptions.workerSrc = (worker as unknown as { default: string }).default || (worker as unknown as string);
+        }
+      } catch {
+        // Ignore worker setup failures; pdfjs may still work in-thread in some envs
+      }
+
+      const loadingTask = pdfjs.getDocument({ data: arrayBuffer });
+      const doc = await loadingTask.promise;
+      preview = `PDF: ${doc.numPages} page${doc.numPages > 1 ? 's' : ''}`;
+      // Extract text from first 1-2 pages for a concise preview
+      const pagesToRead = Math.min(2, doc.numPages);
+      for (let i = 1; i <= pagesToRead; i++) {
+        const page = await doc.getPage(i);
+        const tc = await page.getTextContent();
+        const pageText = tc.items.map((it: { str?: string }) => it.str || '').join(' ');
+        textContent += pageText + (i < pagesToRead ? '\n\n' : '');
+      }
+      if (textContent.length > 1500) {
+        textContent = textContent.substring(0, 1500) + '...';
+      }
+    } catch {
+      // Ignore and fall back to generic info
+      preview = `PDF (${(file.size / 1024).toFixed(1)} KB)`;
+      textContent = '';
+    }
+
+    return {
+      name: file.name,
+      type: file.type || 'application/pdf',
+      size: file.size,
+      content: textContent || null,
+      preview,
+      format: 'pdf',
+    };
+  }
+
+  // DOCX preview using mammoth (first ~1500 chars)
+  private static async parseWord(file: File): Promise<ParsedFile> {
+    let preview = 'Word document';
+    let bodyText = '';
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      // Lazy import to reduce initial bundle
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const mammoth = await import('mammoth');
+      const result = await (mammoth as unknown as { extractRawText: (opts: { arrayBuffer: ArrayBuffer }) => Promise<{ value: string }> }).extractRawText({ arrayBuffer });
+      bodyText = result.value || '';
+      if (bodyText.length > 1500) bodyText = bodyText.substring(0, 1500) + '...';
+      preview = 'Word (DOCX)';
+    } catch {
+      preview = `Word (DOCX) (${(file.size / 1024).toFixed(1)} KB)`;
+    }
+
+    return {
+      name: file.name,
+      type: file.type || 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      size: file.size,
+      content: bodyText || null,
+      preview,
+      format: 'word',
+    };
+  }
+
+  private static async parseImage(file: File): Promise<ParsedFile> {
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+
+    // Try to obtain dimensions for preview
+    const dimensions = await new Promise<{width: number; height: number} | null>((resolve) => {
+      const img = new Image();
+      img.onload = () => resolve({ width: img.width, height: img.height });
+      img.onerror = () => resolve(null);
+      img.src = dataUrl;
+    });
+
+    const preview = dimensions
+      ? `Image: ${dimensions.width}×${dimensions.height} (${file.type || 'image'})`
+      : `Image: ${file.type || 'image'}`;
+
+    return {
+      name: file.name,
+      type: file.type || 'image',
+      size: file.size,
+      content: dataUrl, // Data URL for inlineData; caller extracts base64
+      preview,
+      format: 'image'
     };
   }
 

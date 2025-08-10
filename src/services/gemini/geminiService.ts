@@ -1,7 +1,7 @@
 import { GoogleGenerativeAI, FunctionCallingMode } from '@google/generative-ai';
 import type { Tool, GenerativeModel, ChatSession } from '@google/generative-ai';
 import { allFunctionDeclarations } from './functionDeclarations';
-import type { ChatMessage } from '../../types/ai.types';
+import type { ChatMessage, FileAttachment } from '../../types/ai.types';
 import { getFriendlyCompletionMessage } from '../../utils/minimalFunctionMappings';
 
 export class GeminiService {
@@ -14,6 +14,22 @@ export class GeminiService {
     this.genAI = new GoogleGenerativeAI(apiKey);
     this.functionHandlers = new Map();
     this.initializeModel();
+  }
+
+  // Best-effort image mime type inference from filename or data URL
+  private inferImageMimeType(filenameOrName: string, dataUrl?: string): string {
+    const lower = (filenameOrName || '').toLowerCase();
+    if (lower.endsWith('.png')) return 'image/png';
+    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+    if (lower.endsWith('.webp')) return 'image/webp';
+    if (lower.endsWith('.gif')) return 'image/gif';
+    if (lower.endsWith('.bmp')) return 'image/bmp';
+    if (dataUrl && dataUrl.startsWith('data:')) {
+      const semi = dataUrl.indexOf(';');
+      const colon = dataUrl.indexOf(':');
+      if (semi > colon && colon >= 0) return dataUrl.substring(colon + 1, semi);
+    }
+    return 'image/png';
   }
 
   private initializeModel() {
@@ -442,20 +458,40 @@ REMEMBER:
   }
 
   // Send a message and handle function calls
-  public async sendMessage(message: string, history: ChatMessage[] = []): Promise<ChatMessage[]> {
+  public async sendMessage(message: string, history: ChatMessage[] = [], attachments: FileAttachment[] = []): Promise<ChatMessage[]> {
     const responses: ChatMessage[] = [];
 
     try {
       // Convert history to Gemini format
       const formattedHistory = this.formatHistory(history);
       
-      // Start a new chat with history
+      // Start a new chat with history (including prior image parts if any)
       this.chat = this.model.startChat({
         history: formattedHistory,
       });
 
-      // Send the message
-      const result = await this.chat.sendMessage(message);
+      // Build user parts: text + any inline image data
+      const userParts: Array<Record<string, unknown>> = [];
+      if (message && message.trim().length > 0) {
+        userParts.push({ text: message });
+      }
+      attachments
+        .filter(att => att && typeof att.content === 'string' && att.type === 'image')
+        .forEach(att => {
+          const dataUrl = att.content as string;
+          const commaIdx = dataUrl.indexOf(',');
+          const base64Data = commaIdx >= 0 ? dataUrl.substring(commaIdx + 1) : dataUrl;
+          userParts.push({
+            inlineData: {
+              mimeType: this.inferImageMimeType(att.name, dataUrl),
+              data: base64Data,
+            },
+          });
+        });
+
+      // Send the message as multimodal parts (text + images)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const result = await this.chat.sendMessage((userParts.length > 0 ? userParts : [{ text: message }]) as any);
       const response = result.response;
 
       // Check if there are function calls
@@ -504,6 +540,8 @@ REMEMBER:
         
         // Create response messages for all function results
         const functionResponseParts: unknown[] = [];
+        // Collect image parts to send in a separate message (cannot mix with FunctionResponse)
+        const imagePartsToSend: unknown[] = [];
         
         results.forEach((result) => {
           if (result.success) {
@@ -524,6 +562,27 @@ REMEMBER:
                 response: result.result,
               },
             });
+            // Queue image for a separate message if scan_sheet produced one
+            if (
+              result.name === 'scan_sheet' &&
+              result.result &&
+              typeof result.result === 'object' &&
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              (result.result as any).imageDataUrl &&
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              typeof (result.result as any).imageDataUrl === 'string'
+            ) {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const dataUrl = (result.result as any).imageDataUrl as string;
+              const commaIdx = dataUrl.indexOf(',');
+              const base64Data = commaIdx >= 0 ? dataUrl.substring(commaIdx + 1) : dataUrl;
+              imagePartsToSend.push({
+                inlineData: {
+                  mimeType: 'image/png',
+                  data: base64Data,
+                },
+              });
+            }
           } else {
             responses.push({
               id: this.generateId(),
@@ -543,8 +602,14 @@ REMEMBER:
         if (functionResponseParts.length > 0) {
           try {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const followUpResult = await this.chat.sendMessage(functionResponseParts as any);
-            const followUpResponse = followUpResult.response;
+            let followUpResult = await this.chat.sendMessage(functionResponseParts as any);
+            let followUpResponse = followUpResult.response;
+            // If we have images to attach, send them in a separate message immediately after
+            if (imagePartsToSend.length > 0) {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              followUpResult = await this.chat.sendMessage(imagePartsToSend as any);
+              followUpResponse = followUpResult.response;
+            }
             
             // Check for additional function calls (compositional)
             const additionalCalls = followUpResponse.functionCalls();
@@ -665,6 +730,7 @@ REMEMBER:
     
     const results = await Promise.all(functionPromises);
     const functionResponseParts: unknown[] = [];
+    const imagePartsToSend: unknown[] = [];
     
     results.forEach((result) => {
       if (result.success) {
@@ -685,6 +751,26 @@ REMEMBER:
             response: result.result,
           },
         });
+        if (
+          result.name === 'scan_sheet' &&
+          result.result &&
+          typeof result.result === 'object' &&
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (result.result as any).imageDataUrl &&
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          typeof (result.result as any).imageDataUrl === 'string'
+        ) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const dataUrl = (result.result as any).imageDataUrl as string;
+          const commaIdx = dataUrl.indexOf(',');
+          const base64Data = commaIdx >= 0 ? dataUrl.substring(commaIdx + 1) : dataUrl;
+          imagePartsToSend.push({
+            inlineData: {
+              mimeType: 'image/png',
+              data: base64Data,
+            },
+          });
+        }
       } else {
         responses.push({
           id: this.generateId(),
@@ -704,8 +790,13 @@ REMEMBER:
     if (functionResponseParts.length > 0) {
       try {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const followUpResult = await this.chat.sendMessage(functionResponseParts as any);
-        const followUpResponse = followUpResult.response;
+        let followUpResult = await this.chat.sendMessage(functionResponseParts as any);
+        let followUpResponse = followUpResult.response;
+        if (imagePartsToSend.length > 0) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          followUpResult = await this.chat.sendMessage(imagePartsToSend as any);
+          followUpResponse = followUpResult.response;
+        }
         
         const additionalCalls = followUpResponse.functionCalls();
         if (additionalCalls && additionalCalls.length > 0) {

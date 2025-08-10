@@ -3115,6 +3115,29 @@ const ExcelSpreadsheet: React.FC = memo(() => {
       return data;
     },
 
+    // High-quality screenshot of the visible sheet area for AI context
+    getSheetScreenshotDataUrl: async () => {
+      if (!tableRef.current) return '';
+      const tableEl = tableRef.current as HTMLTableElement;
+      // Use the scroll container to bound the capture to the visible grid area
+      const container = scrollContainerRef.current as HTMLDivElement | null;
+      const target = container ?? tableEl;
+      const canvas = await html2canvas(target, {
+        backgroundColor: '#ffffff',
+        useCORS: true,
+        scale: Math.min(2, Math.max(1, (window.devicePixelRatio || 1))),
+        logging: false,
+        allowTaint: true,
+        width: target.clientWidth,
+        height: target.clientHeight,
+        x: target.scrollLeft ?? 0,
+        y: target.scrollTop ?? 0,
+        windowWidth: document.documentElement.clientWidth,
+        windowHeight: document.documentElement.clientHeight,
+      });
+      return canvas.toDataURL('image/png');
+    },
+
     setRangeValues: (startRow: number, startCol: number, values: (string | number | null)[][]) => {
       values.forEach((rowValues, rowIndex) => {
         rowValues.forEach((value, colIndex) => {
@@ -3482,7 +3505,7 @@ const ExcelSpreadsheet: React.FC = memo(() => {
       }
       return count > 0 ? sum / count : 0;
     },
-  }), [getCellValue, setCellValue, formatSelectedCells, handleInsertLink, visibleRows, visibleCols, setSelectedCell, setSelectedRange]);
+  }), [getCellValue, setCellValue, handleInsertLink, visibleRows, visibleCols, setSelectedCell, sheetData]);
 
   return (
     <div className="spreadsheet-container" tabIndex={0} onFocus={() => {}} onClick={() => {}}>

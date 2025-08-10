@@ -781,6 +781,11 @@ export const reorganizeDataDeclaration: FunctionDeclaration = {
           valueColumn: { type: SchemaType.NUMBER },
           preserveFormatting: { type: SchemaType.BOOLEAN },
           sortResult: { type: SchemaType.BOOLEAN },
+          // Consolidate-specific options
+          removeDuplicates: { type: SchemaType.BOOLEAN, description: 'If true, scans the sheet and clears duplicate copies of the source block' },
+          removeEmptyColumns: { type: SchemaType.BOOLEAN, description: 'If true, drops empty columns while consolidating' },
+          scanMaxRows: { type: SchemaType.NUMBER, description: 'Max rows to scan when detecting duplicate blocks' },
+          scanMaxCols: { type: SchemaType.NUMBER, description: 'Max columns to scan when detecting duplicate blocks' },
         },
       },
     },
@@ -965,7 +970,7 @@ export const calculateAverageDeclaration: FunctionDeclaration = {
 
 export const scanSheetDeclaration: FunctionDeclaration = {
   name: 'scan_sheet',
-  description: 'Scan the sheet to find all data. ALWAYS use this when user asks "what\'s in the sheet" or wants an overview. Can optionally include formatting information.',
+  description: 'Scan the sheet to find all data. ALWAYS use this when user asks "what\'s in the sheet" or wants an overview. Optionally include formatting; when available, a screenshot image of the sheet view will be attached for visual context.',
   parameters: {
     type: SchemaType.OBJECT,
     properties: {

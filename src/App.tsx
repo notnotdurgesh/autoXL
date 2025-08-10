@@ -1,5 +1,6 @@
 import ExcelSpreadsheet from './components/ExcelSpreadsheet'
 import DemoDisclaimer from './components/DemoDisclaimer'
+import LoveBadge from './components/LoveBadge'
 import './App.css'
 
 function App() {
@@ -16,6 +17,7 @@ function App() {
     }}>
       <ExcelSpreadsheet />
       <DemoDisclaimer />
+      <LoveBadge />
     </div>
   )
 }

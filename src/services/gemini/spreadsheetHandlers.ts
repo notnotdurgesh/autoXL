@@ -9,6 +9,11 @@ export interface SpreadsheetOperations {
   setRangeValues: (startRow: number, startCol: number, values: (string | number | null)[][]) => void;
   getCellData?: (row: number, col: number) => {value: string | number | null; formatting?: CellFormatting};
   getRangeData?: (startRow: number, startCol: number, endRow: number, endCol: number) => {value: string | number | null; formatting?: CellFormatting}[][];
+  /**
+   * Optional: Returns a PNG data URL screenshot of the current sheet view.
+   * If implemented, this will be attached to scan_sheet tool responses for multimodal context.
+   */
+  getSheetScreenshotDataUrl?: () => Promise<string> | string;
   setCellFormatting: (params: {
     startRow: number;
     startCol: number;
@@ -136,12 +141,27 @@ export function createSpreadsheetHandlers(operations: SpreadsheetOperations) {
           
           return result;
         });
-        
+        // Try to capture a screenshot of the sheet if the integration provides it
+        let imageDataUrl: string | undefined;
+        try {
+          if (operations.getSheetScreenshotDataUrl) {
+            const maybePromise = operations.getSheetScreenshotDataUrl();
+            imageDataUrl = typeof (maybePromise as unknown) === 'string'
+              ? (maybePromise as string)
+              : await (maybePromise as Promise<string>);
+          }
+        } catch {
+          // Non-fatal if screenshot fails
+          imageDataUrl = undefined;
+        }
+
         return {
           isEmpty: false,
           dataRange: dataRange,
           dataCount: dataFound.length,
           cells: cellData,
+          // Provide the data URL so the caller can attach it as an image part
+          imageDataUrl: imageDataUrl,
           message: `Found ${dataFound.length} cells with data in range ${dataRange}${includeFormatting ? ' (with formatting)' : ''}`
         };
       } catch (error) {
@@ -708,12 +728,95 @@ export function createSpreadsheetHandlers(operations: SpreadsheetOperations) {
             reorganizedData = Array.from(grouped.values()).flat();
           }
           break;
-        case 'consolidate':
-          // Remove empty rows
-          reorganizedData = sourceData.filter(row => 
-            row.some(cell => cell !== '' && cell !== null)
-          );
+        case 'consolidate': {
+          // Options with safe defaults
+          const removeDuplicates = (args.options as Record<string, unknown> | undefined)?.removeDuplicates !== false;
+          const removeEmptyColumns = (args.options as Record<string, unknown> | undefined)?.removeEmptyColumns !== false;
+          const scanMaxRows = Number((args.options as Record<string, unknown> | undefined)?.scanMaxRows ?? 100);
+          const scanMaxCols = Number((args.options as Record<string, unknown> | undefined)?.scanMaxCols ?? 26);
+
+          // 1) Remove empty rows from the selected block
+          const nonEmptyRows = sourceData.filter(row => row.some(cell => cell !== '' && cell !== null));
+
+          // 2) Optionally remove empty columns
+          let cleanedData = nonEmptyRows;
+          if (removeEmptyColumns && nonEmptyRows.length > 0) {
+            const colCount = Math.max(...nonEmptyRows.map(r => r.length));
+            const colsToKeep: number[] = [];
+            for (let c = 0; c < colCount; c++) {
+              let hasValue = false;
+              for (let r = 0; r < nonEmptyRows.length; r++) {
+                const v = nonEmptyRows[r][c];
+                if (v !== '' && v !== null && v !== undefined) {
+                  hasValue = true;
+                  break;
+                }
+              }
+              if (hasValue) colsToKeep.push(c);
+            }
+            cleanedData = nonEmptyRows.map(row => colsToKeep.map(c => row[c]));
+          }
+
+          reorganizedData = cleanedData;
+
+          // 3) Optionally detect and clear duplicate blocks elsewhere in the sheet
+          if (removeDuplicates && cleanedData.length > 0 && cleanedData[0]?.length > 0) {
+            const height = args.sourceRange.endRow - args.sourceRange.startRow + 1;
+            const width = args.sourceRange.endCol - args.sourceRange.startCol + 1;
+
+            // Use the original block shape for duplicate detection
+            const fullSheet = operations.getRangeValues(0, 0, Math.max(0, scanMaxRows - 1), Math.max(0, scanMaxCols - 1));
+
+            const isSameBlock = (top: number, left: number) => {
+              for (let r = 0; r < height; r++) {
+                const rowA = sourceData[r] || [];
+                const rowB = fullSheet[top + r] || [];
+                for (let c = 0; c < width; c++) {
+                  const a = rowA[c] ?? '';
+                  const b = rowB[left + c] ?? '';
+                  const normA = typeof a === 'string' ? a.trim() : a;
+                  const normB = typeof b === 'string' ? b.trim() : b;
+                  if (normA !== normB) return false;
+                }
+              }
+              return true;
+            };
+
+            const srcTop0 = args.sourceRange.startRow - 1;
+            const srcLeft0 = args.sourceRange.startCol - 1;
+
+            for (let r = 0; r + height <= fullSheet.length; r++) {
+              const rowLen = fullSheet[r]?.length ?? 0;
+              for (let c = 0; c + width <= Math.max(rowLen, scanMaxCols); c++) {
+                // Skip the original source location
+                if (r === srcTop0 && c === srcLeft0) continue;
+
+                if (isSameBlock(r, c)) {
+                  // Clear this duplicate region (convert to 1-based)
+                  operations.clearRange({
+                    startRow: r,
+                    startCol: c,
+                    endRow: r + height - 1,
+                    endCol: c + width - 1,
+                    clearContent: true,
+                    clearFormatting: false,
+                  });
+                }
+              }
+            }
+          }
+
+          // 4) Clear the original source area before writing back to avoid leftover cells when columns shrank
+          operations.clearRange({
+            startRow: args.sourceRange.startRow - 1,
+            startCol: args.sourceRange.startCol - 1,
+            endRow: args.sourceRange.endRow - 1,
+            endCol: args.sourceRange.endCol - 1,
+            clearContent: true,
+            clearFormatting: false,
+          });
           break;
+        }
         case 'distribute':
           // Spread data across more cells
           reorganizedData = [];

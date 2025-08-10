@@ -37,6 +37,63 @@ const AIChat: React.FC<AIChatProps> = ({ spreadsheetOperations, hideFab = false 
   const inputRef = useRef<HTMLInputElement>(null);
   const geminiServiceRef = useRef<GeminiService | null>(null);
 
+  // Paste handler to accept images/files from clipboard
+  const handlePasteIntoChat = useCallback(async (e: React.ClipboardEvent<HTMLDivElement | HTMLInputElement>) => {
+    try {
+      const clipboardData = e.clipboardData;
+      if (!clipboardData) return;
+      const items = clipboardData.items;
+      const files: File[] = [];
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (item.kind === 'file') {
+          const f = item.getAsFile();
+          if (f) files.push(f);
+        }
+      }
+      const newAttachments: FileAttachment[] = [];
+      if (files.length > 0) {
+        e.preventDefault();
+        for (const f of files) {
+          const parsed = await FileParser.parseFile(f);
+          newAttachments.push({
+            id: `file_${Date.now()}_${Math.random()}`,
+            name: parsed.name,
+            type: parsed.format,
+            size: parsed.size,
+            content: parsed.content,
+            preview: parsed.preview,
+          });
+        }
+      } else {
+        // Some apps paste images as data URLs in text/plain
+        const text = clipboardData.getData('text/plain');
+        const isImageDataUrl = /^data:image\/(png|jpeg|jpg|webp|gif|bmp);base64,.+/i.test(text);
+        if (isImageDataUrl) {
+          e.preventDefault();
+          const mime = text.substring(5, text.indexOf(';')) || 'image/png';
+          const ext = mime.includes('jpeg') || mime.includes('jpg') ? 'jpg' : mime.includes('webp') ? 'webp' : mime.includes('gif') ? 'gif' : mime.includes('bmp') ? 'bmp' : 'png';
+          const commaIdx = text.indexOf(',');
+          const b64 = commaIdx >= 0 ? text.substring(commaIdx + 1) : text;
+          const approxSize = Math.floor((b64.length * 3) / 4);
+          newAttachments.push({
+            id: `file_${Date.now()}_${Math.random()}`,
+            name: `pasted-image.${ext}`,
+            type: 'image',
+            size: approxSize,
+            content: text,
+            preview: `Pasted image (${mime})`,
+          });
+        }
+      }
+      if (newAttachments.length > 0) {
+        setFileContexts(prev => [...prev, ...newAttachments]);
+      }
+    } catch (err) {
+      console.error('Paste handling failed:', err);
+    }
+  }, []);
+
   // Initialize Gemini service with spreadsheet handlers
   const initializeGeminiService = useCallback((key: string) => {
     try {
@@ -142,11 +199,13 @@ const AIChat: React.FC<AIChatProps> = ({ spreadsheetOperations, hideFab = false 
     }
     
     if (fileContexts.length > 0) {
-      const fileInfo = fileContexts.map(file => 
-        `\n[File: ${file.name} (${file.type}): ${typeof file.content === 'string' 
-          ? file.content.substring(0, 1000) 
-          : JSON.stringify(file.content)}]`
-      ).join('');
+      const fileInfo = fileContexts.map(file => {
+        const isImage = file.type === 'image' && typeof file.content === 'string';
+        const summary = isImage
+          ? '(image attached)'
+          : (typeof file.content === 'string' ? file.content.substring(0, 1000) : JSON.stringify(file.content));
+        return `\n[File: ${file.name} (${file.type}): ${summary}]`;
+      }).join('');
       messageContentForAPI += fileInfo;
     }
 
@@ -161,6 +220,7 @@ const AIChat: React.FC<AIChatProps> = ({ spreadsheetOperations, hideFab = false 
     };
 
     const updatedMessages = [...messages, userMessage];
+    const attachmentsForSend = fileContexts; // preserve before clearing
     setMessages(updatedMessages);
     setInputValue('');
     setCellContexts([]); // Clear contexts after sending
@@ -170,7 +230,11 @@ const AIChat: React.FC<AIChatProps> = ({ spreadsheetOperations, hideFab = false 
 
     try {
       // Send the full context to API but display nicely in UI
-      const responses = await geminiServiceRef.current.sendMessage(messageContentForAPI, updatedMessages);
+      const responses = await geminiServiceRef.current.sendMessage(
+        messageContentForAPI,
+        updatedMessages,
+        attachmentsForSend
+      );
       setMessages(prev => [...prev, ...responses]);
     } catch (err) {
       console.error('Error sending message:', err);
@@ -329,6 +393,7 @@ const AIChat: React.FC<AIChatProps> = ({ spreadsheetOperations, hideFab = false 
           overflow: 'hidden',
           border: isDragging ? '2px dashed #667eea' : '1px solid #dee2e6',
         }}
+        onPaste={handlePasteIntoChat}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleFileDrop}
@@ -1186,7 +1251,7 @@ const AIChat: React.FC<AIChatProps> = ({ spreadsheetOperations, hideFab = false 
                   type="file"
                   id="file-upload"
                   multiple
-                  accept=".csv,.xlsx,.xls,.json,.txt,.tsv,.tab"
+                  accept="image/*,.csv,.xlsx,.xls,.json,.txt,.tsv,.tab"
                   style={{ display: 'none' }}
                   onChange={async (e) => {
                     const files = Array.from(e.target.files || []);
@@ -1239,8 +1304,9 @@ const AIChat: React.FC<AIChatProps> = ({ spreadsheetOperations, hideFab = false 
                   type="text"
                   value={inputValue}
                   onChange={(e) => setInputValue(e.target.value)}
+                  onPaste={handlePasteIntoChat}
                   onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
-                  placeholder={apiKey ? "Ask me anything about your spreadsheet..." : "Set API key in settings first..."}
+                  placeholder={apiKey ? "Ask me anything about your sheet..." : "Set API key in settings first..."}
                   disabled={!apiKey || isLoading}
                   style={{
                     flex: 1,
@@ -1248,7 +1314,7 @@ const AIChat: React.FC<AIChatProps> = ({ spreadsheetOperations, hideFab = false 
                     border: '1px solid #ced4da',
                     borderRadius: '4px',
                     fontSize: '13px',
-                    color: '#495057',
+                    color: 'white',
                     outline: 'none',
                   }}
                 />
@@ -1690,30 +1756,42 @@ const AIChat: React.FC<AIChatProps> = ({ spreadsheetOperations, hideFab = false 
                   </div>
                   
                   {file.content && (
-                    <div
-                      style={{
-                        padding: '8px',
-                        backgroundColor: 'white',
-                        borderRadius: '4px',
-                        fontSize: '12px',
-                        fontFamily: 'monospace',
-                        color: '#4a5568',
-                        maxHeight: '100px',
-                        overflow: 'auto',
-                      }}
-                    >
-                      {typeof file.content === 'string' 
-                        ? file.content.substring(0, 500)
-                        : Array.isArray(file.content) 
-                          ? file.content.slice(0, 5).map((row, i) => (
+                    file.type === 'image' && typeof file.content === 'string' && file.content.startsWith('data:image') ? (
+                      <div style={{ padding: '8px', backgroundColor: 'white', borderRadius: '4px' }}>
+                        <img
+                          src={file.content}
+                          alt={file.name}
+                          style={{ maxWidth: '100%', maxHeight: '320px', borderRadius: '6px', display: 'block', margin: '0 auto' }}
+                        />
+                      </div>
+                    ) : (
+                      <div
+                        style={{
+                          padding: '8px',
+                          backgroundColor: 'white',
+                          borderRadius: '4px',
+                          fontSize: '12px',
+                          fontFamily: 'monospace',
+                          color: '#4a5568',
+                          maxHeight: '160px',
+                          overflow: 'auto',
+                        }}
+                      >
+                        {Array.isArray(file.content)
+                          ? (file.content as unknown[]).slice(0, 8).map((row, i) => (
                               <div key={i}>
-                                {Array.isArray(row) 
-                                  ? row.map(v => v ?? '').join(' | ')
-                                  : row}
+                                {Array.isArray(row)
+                                  ? (row as unknown[]).map(v => (v ?? '') as string).join(' | ')
+                                  : String(row)}
                               </div>
                             ))
-                          : 'Binary content'}
-                    </div>
+                          : typeof file.content === 'string'
+                            ? (file.type === 'json'
+                                ? (() => { try { const obj = JSON.parse(file.content as string); return JSON.stringify(obj, null, 2).substring(0, 1000); } catch { return (file.content as string).substring(0, 1000); } })()
+                                : (file.content as string).substring(0, 1000))
+                            : 'Binary content'}
+                      </div>
+                    )
                   )}
                 </div>
               ))}
