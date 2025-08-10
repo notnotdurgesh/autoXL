@@ -111,13 +111,13 @@ const ActionSidebar: React.FC<ActionSidebarProps> = memo(({
         </div>
         <div className="action-sidebar-content">
           <div className="action-group-label">File</div>
-          {/* <button className="action-btn" onClick={onSave} disabled={!onSave} title="Save JSON">
+          <button className="action-btn" onClick={onSave} disabled={!onSave} title="Save JSON">
             <Save size={14} className="action-icon" />
             <div>
               <div>Save</div>
               <div className="action-desc">Download JSON snapshot</div>
             </div>
-          </button> */}
+          </button>
           <button className="action-btn" onClick={onSaveAsExcel} disabled={!onSaveAsExcel} title="Save as .xlsx">
             <FileDown size={14} className="action-icon" />
             <div>

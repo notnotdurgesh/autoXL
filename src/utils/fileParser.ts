@@ -14,7 +14,7 @@ export interface ParsedFile {
 
 export class FileParser {
   private static readonly MAX_PREVIEW_LENGTH = 200;
-  private static readonly MAX_ROWS_PREVIEW = 10;
+  // private static readonly MAX_ROWS_PREVIEW = 10;
 
   static async parseFile(file: File): Promise<ParsedFile> {
     const name = file.name;
@@ -89,13 +89,12 @@ export class FileParser {
   private static async parseCSV(file: File): Promise<ParsedFile> {
     return new Promise((resolve) => {
       Papa.parse(file, {
-        complete: (result) => {
+        complete: (result: any) => {
           const data = result.data as any[][];
           const rows = data.length;
           const columns = data[0]?.length || 0;
           
           // Create preview
-          const previewRows = data.slice(0, this.MAX_ROWS_PREVIEW);
           const preview = `CSV: ${rows} rows × ${columns} columns\nHeaders: ${data[0]?.slice(0, 5).join(', ')}${data[0]?.length > 5 ? '...' : ''}`;
 
           resolve({
@@ -109,7 +108,7 @@ export class FileParser {
             format: 'csv'
           });
         },
-        error: (error) => {
+        error: (error: any) => {
           resolve({
             name: file.name,
             type: file.type,
@@ -183,7 +182,7 @@ export class FileParser {
   private static async parseTSV(file: File): Promise<ParsedFile> {
     return new Promise((resolve) => {
       Papa.parse(file, {
-        complete: (result) => {
+        complete: (result: any) => {
           const data = result.data as any[][];
           const rows = data.length;
           const columns = data[0]?.length || 0;
