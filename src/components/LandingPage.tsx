@@ -1,23 +1,12 @@
 import { useEffect, useState } from 'react';
 
 const LandingPage = () => {
-  const [countdown, setCountdown] = useState(3);
   const [isRedirecting, setIsRedirecting] = useState(false);
 
   useEffect(() => {
-    const timer = setInterval(() => {
-      setCountdown((prev) => {
-        if (prev <= 1) {
-          setIsRedirecting(true);
-          // Redirect to the external AutoXL homepage
-          window.location.href = 'https://autoxl-home.vercel.app/';
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 0);
+    setIsRedirecting(true);
+    window.location.href = 'https://autoxl-home.vercel.app/';
 
-    return () => clearInterval(timer);
   }, []);
 
   const handleManualRedirect = () => {
