@@ -15,7 +15,7 @@ const LandingPage = () => {
         }
         return prev - 1;
       });
-    }, 1000);
+    }, 0);
 
     return () => clearInterval(timer);
   }, []);
@@ -69,24 +69,7 @@ const LandingPage = () => {
         }}>
           AutoXL
         </h1>
-        
-        <p style={{ 
-          color: '#7f8c8d', 
-          marginBottom: '2rem',
-          fontSize: '1.1rem',
-          lineHeight: '1.6'
-        }}>
-          Redirecting you to the AutoXL homepage in{' '}
-          <span style={{ 
-            color: '#3498db', 
-            fontWeight: 'bold',
-            fontSize: '1.2rem'
-          }}>
-            {countdown}
-          </span>{' '}
-          seconds...
-        </p>
-        
+
         <div style={{
           width: '60px',
           height: '60px',
