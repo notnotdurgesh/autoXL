@@ -1,6 +1,7 @@
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom'
+import { BrowserRouter as Router, Routes, Route } from 'react-router-dom'
 import LandingPage from './components/LandingPage'
 import SpreadsheetPage from './components/SpreadsheetPage'
+import NotFound from './components/NotFound'
 import './App.css'
 
 function App() {
@@ -13,8 +14,8 @@ function App() {
         {/* Sheet route shows the spreadsheet */}
         <Route path="/sheet" element={<SpreadsheetPage />} />
         
-        {/* Catch all other routes and redirect to root */}
-        <Route path="*" element={<Navigate to="/" replace />} />
+        {/* Catch all other routes and show 404 page */}
+        <Route path="*" element={<NotFound />} />
       </Routes>
     </Router>
   )
